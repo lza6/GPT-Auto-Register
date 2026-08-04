@@ -109,6 +109,7 @@ GPT-Auto-Register/
 | `register_interval_sec` | 注册间隔（秒） | `10` |
 | `otp_wait_timeout_sec` | 验证码等待超时 | `600` |
 | `batch_size` | 默认批量数量 | `100` |
+| `use_oauth_pkce` | 注册时走 OAuth PKCE 获取 OpenAI refresh_token（长期续期） | `true` |
 | `chatgpt2api_url` | chatgpt2api 地址 | `http://127.0.0.1:23456` |
 | `chatgpt2api_admin_key` | chatgpt2api 管理密钥（留空自动读取） | - |
 

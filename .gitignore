@@ -35,3 +35,13 @@ scripts/*.jsonl
 # 系统
 .DS_Store
 Thumbs.db
+
+# 本地工具配置（勿提交）
+.claude/
+.codegraph/
+.cursor/
+.gemini/
+.kiro/
+.windsurf/
+.mcp.json
+opencode.json

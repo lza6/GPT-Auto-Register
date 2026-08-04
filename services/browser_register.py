@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import re
+import secrets
 import time
 import uuid
 from typing import Any
+from urllib.parse import parse_qs, urlencode, urlparse
+
+import httpx
 
 from services.db import add_log
 from services.email_service import email_service
@@ -12,6 +18,20 @@ from services.graph_email_service import graph_email_service
 from services.imap_email_service import imap_email_service
 from services.name_service import name_service
 from services.proxy_service import proxy_service
+
+# OAuth PKCE 常量（与 chatgpt2api 同一 client，注册成功后可拿到 refresh_token 长期续期）
+OAUTH_CLIENT_ID = "app_2SKx67EdpoN0G6j64rFvigXD"
+OAUTH_REDIRECT_URI = "https://platform.openai.com/auth/callback"
+OAUTH_AUDIENCE = "https://api.openai.com/v1"
+OAUTH_AUTH0_CLIENT = "eyJuYW1lIjoiYXV0aDAtc3BhLWpzIiwidmVyc2lvbiI6IjEuMjEuMCJ9"
+
+
+def _generate_pkce() -> tuple[str, str]:
+    """生成 PKCE code_verifier 与 S256 code_challenge"""
+    verifier = secrets.token_urlsafe(64)
+    digest = hashlib.sha256(verifier.encode()).digest()
+    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+    return verifier, challenge
 
 
 class BrowserRegister:
@@ -53,7 +73,8 @@ class BrowserRegister:
         """用浏览器注册单个账号"""
         result: dict[str, Any] = {
             "email": email, "status": "failed", "error": "",
-            "access_token": "", "name": "", "birthdate": "", "proxy": "",
+            "access_token": "", "refresh_token": "", "id_token": "",
+            "name": "", "birthdate": "", "proxy": "",
         }
         name = name_service.generate()
         birthdate = name_service.generate_birthdate()
@@ -65,6 +86,36 @@ class BrowserRegister:
             proxy_service.get_next() if self.config.get("use_proxy", False) else None
         )
         result["proxy"] = proxy_service.format_for_display(proxy_url) if proxy_url else "直连"
+
+        # OAuth PKCE：注册走 authorize 流程，成功后拿 access_token + refresh_token + id_token（长期续期）
+        use_pkce = self.config.get("use_oauth_pkce", True)
+        code_verifier = ""
+        code_challenge = ""
+        authorize_url = ""
+        if use_pkce:
+            try:
+                code_verifier, code_challenge = _generate_pkce()
+                params = {
+                    "issuer": "https://auth.openai.com",
+                    "client_id": OAUTH_CLIENT_ID,
+                    "audience": OAUTH_AUDIENCE,
+                    "redirect_uri": OAUTH_REDIRECT_URI,
+                    "device_id": str(uuid.uuid4()),
+                    "screen_hint": "login_or_signup",
+                    "max_age": "0",
+                    "scope": "openid profile email offline_access",
+                    "response_type": "code",
+                    "response_mode": "query",
+                    "state": secrets.token_urlsafe(16),
+                    "nonce": secrets.token_urlsafe(16),
+                    "code_challenge": code_challenge,
+                    "code_challenge_method": "S256",
+                    "auth0Client": OAUTH_AUTH0_CLIENT,
+                    "login_hint": email,
+                }
+                authorize_url = f"https://auth.openai.com/api/accounts/authorize?{urlencode(params)}"
+            except Exception as e:
+                add_log("warning", f"[{email}] PKCE 生成失败，回退普通注册: {e}")
 
         try:
             from camoufox.async_api import AsyncCamoufox
@@ -104,9 +155,10 @@ class BrowserRegister:
             context = await browser.new_context(**context_kwargs)
             page = await context.new_page()
 
-            # ── Step 1: 访问登录页面 ──
-            add_log("info", f"[{email}] Step 1: 访问登录页面...")
-            await page.goto("https://chatgpt.com/auth/login", wait_until="networkidle", timeout=60000)
+            # ── Step 1: 访问登录/注册页面（优先 OAuth authorize，可拿 refresh_token；失败自动回退 chatgpt 入口） ──
+            entry_url = authorize_url or "https://chatgpt.com/auth/login"
+            add_log("info", f"[{email}] Step 1: 访问登录页面 ({'OAuth authorize' if authorize_url else 'chatgpt.com'})...")
+            await page.goto(entry_url, wait_until="networkidle", timeout=60000)
             await asyncio.sleep(5)
 
             # 先关闭 cookie 弹窗（如果有的话）
@@ -324,6 +376,23 @@ class BrowserRegister:
             add_log("info", f"[{email}] Step 8: 等待注册完成...")
             await asyncio.sleep(8)
 
+            # 若走了 OAuth authorize，注册完成后会自动重定向到 redirect_uri 并携带 code，
+            # 用 code + verifier 换取 access_token + refresh_token + id_token（长期续期）
+            if authorize_url:
+                code = await self._wait_for_oauth_code(page, timeout=45)
+                if code:
+                    add_log("info", f"[{email}] 捕获 OAuth code，换取 token 三件套...")
+                    tokens = await self._exchange_code(code, code_verifier, proxy_url)
+                    if tokens and tokens.get("access_token"):
+                        result["access_token"] = tokens["access_token"]
+                        result["refresh_token"] = tokens.get("refresh_token", "")
+                        result["id_token"] = tokens.get("id_token", "")
+                        add_log("info", f"[{email}] ✅ 已获取 OpenAI 三件套 (refresh_token 可用于长期续期)")
+                    else:
+                        add_log("warning", f"[{email}] OAuth code 换 token 失败，回退 session API")
+                else:
+                    add_log("warning", f"[{email}] 未捕获 OAuth code，回退 session API")
+
             # 先导航到 chatgpt.com 主页（确保登录状态稳定）
             add_log("info", f"[{email}] 导航到 chatgpt.com 主页...")
             try:
@@ -389,6 +458,60 @@ class BrowserRegister:
                     pass
 
         return result
+
+    async def _wait_for_oauth_code(self, page: Any, timeout: int = 45) -> str:
+        """轮询页面 URL，等待 OAuth authorize 重定向到 redirect_uri 并携带 code"""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                url = page.url
+                if url and "code=" in url:
+                    q = parse_qs(urlparse(url).query)
+                    code = (q.get("code") or [""])[0]
+                    if code:
+                        return code
+            except Exception:
+                pass
+            await asyncio.sleep(1)
+        return ""
+
+    async def _exchange_code(self, code: str, code_verifier: str,
+                             proxy_url: str | None) -> dict | None:
+        """用 OAuth code + verifier 换取 access_token / refresh_token / id_token"""
+        try:
+            proxy_kwargs: dict[str, Any] = {}
+            if proxy_url:
+                proxy_kwargs["proxy"] = proxy_url
+            async with httpx.AsyncClient(timeout=60, verify=False, **proxy_kwargs) as client:
+                resp = await client.post(
+                    "https://auth.openai.com/api/accounts/oauth/token",
+                    headers={
+                        "Accept": "application/json",
+                        "Content-Type": "application/json",
+                        "Origin": "https://platform.openai.com",
+                        "Referer": "https://platform.openai.com/",
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+                    },
+                    json={
+                        "client_id": OAUTH_CLIENT_ID,
+                        "code_verifier": code_verifier,
+                        "grant_type": "authorization_code",
+                        "code": code,
+                        "redirect_uri": OAUTH_REDIRECT_URI,
+                    },
+                )
+                data = resp.json() if resp.text else {}
+                if resp.status_code == 200 and data.get("access_token"):
+                    return {
+                        "access_token": data["access_token"],
+                        "refresh_token": data.get("refresh_token", ""),
+                        "id_token": data.get("id_token", ""),
+                    }
+                add_log("warning", f"OAuth code 换 token 失败: HTTP {resp.status_code}")
+                return None
+        except Exception as e:
+            add_log("warning", f"OAuth code 换 token 异常: {e}")
+            return None
 
 
 browser_register: BrowserRegister | None = None

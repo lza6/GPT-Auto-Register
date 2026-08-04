@@ -201,18 +201,21 @@ def _build_chatgpt2api_account(acc: dict, token_data: dict) -> dict:
 def _collect_export_accounts() -> list[dict]:
     """读取成功账号，导出为 chatgpt2api 格式。
 
-    重要说明：当前注册流程只拿到了 OpenAI 的 access_token（标准 JWT），
-    数据库里的 refresh_token 是微软邮箱的（用于收验证码），不是 OpenAI 的，
-    因此无法用 OAuth 刷新。这里直接导出已有的标准 JWT；
-    有效期内的 access_token 可被 chatgpt2api 直接使用。
+    新版注册账号带有 openai_refresh_token（OAuth PKCE 获取），可刷新拿到最新三件套；
+    老账号只有 access_token（标准 JWT），直接导出，有效期内可被 chatgpt2api 直接使用。
     """
     all_accounts = get_accounts()
     accounts = []
     for acc in all_accounts:
         if acc.get("status") not in ("success", "success_no_token"):
             continue
+        ort = acc.get("openai_refresh_token") or ""
         at = acc.get("access_token") or ""
-        if at.startswith("eyJ") and len(at) > 200:
+        if ort:
+            td = _refresh_oauth(ort)
+            if td and td["access_token"].startswith("eyJ"):
+                accounts.append(_build_chatgpt2api_account(acc, td))
+        elif at.startswith("eyJ") and len(at) > 200:
             accounts.append(_build_chatgpt2api_account(acc, {
                 "access_token": at,
                 "refresh_token": "",

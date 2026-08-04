@@ -46,6 +46,8 @@ def init_db() -> None:
                 client_id TEXT NOT NULL,
                 refresh_token TEXT NOT NULL,
                 access_token TEXT,
+                openai_refresh_token TEXT,
+                id_token TEXT,
                 name TEXT,
                 birthdate TEXT,
                 proxy TEXT,
@@ -84,6 +86,12 @@ def init_db() -> None:
                 value TEXT
             )
         """)
+        # 迁移：为已有 accounts 表补充 OpenAI token 字段（区分微软邮箱 token 与 OpenAI token）
+        for col in ("openai_refresh_token", "id_token"):
+            try:
+                conn.execute(f"ALTER TABLE accounts ADD COLUMN {col} TEXT")
+            except Exception:
+                pass
     conn.close()
 
 
@@ -143,14 +151,16 @@ def mark_email_status(email: str, status: str) -> None:
 
 def insert_account(email: str, password: str, client_id: str, refresh_token: str,
                    access_token: str = "", name: str = "", birthdate: str = "",
-                   proxy: str = "", status: str = "pending", error: str = "") -> None:
+                   proxy: str = "", status: str = "pending", error: str = "",
+                   openai_refresh_token: str = "", id_token: str = "") -> None:
     conn = get_conn()
     with conn:
         conn.execute(
             """INSERT OR REPLACE INTO accounts
-               (email, password, client_id, refresh_token, access_token, name, birthdate, proxy, status, error, registered_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (email, password, client_id, refresh_token, access_token, name, birthdate, proxy, status, error,
+               (email, password, client_id, refresh_token, access_token, openai_refresh_token, id_token, name, birthdate, proxy, status, error, registered_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (email, password, client_id, refresh_token, access_token, openai_refresh_token, id_token,
+             name, birthdate, proxy, status, error,
              time.time() if status == 'success' else None),
         )
     conn.close()

@@ -310,6 +310,7 @@ class RegisterEngine:
                 insert_account(
                     email=email, password=mail["password"],
                     client_id=mail["client_id"], refresh_token=mail["refresh_token"],
+                    openai_refresh_token=result.get("refresh_token", ""), id_token=result.get("id_token", ""),
                     access_token=result["access_token"],
                     name=result["name"], birthdate=result["birthdate"],
                     proxy=result["proxy"], status="success",
@@ -319,6 +320,7 @@ class RegisterEngine:
                 insert_account(
                     email=email, password=mail["password"],
                     client_id=mail["client_id"], refresh_token=mail["refresh_token"],
+                    openai_refresh_token=result.get("refresh_token", ""), id_token=result.get("id_token", ""),
                     proxy=result["proxy"], status="cf_blocked",
                     error="遇到 Cloudflare 人机验证",
                 )
@@ -328,6 +330,7 @@ class RegisterEngine:
                 insert_account(
                     email=email, password=mail["password"],
                     client_id=mail["client_id"], refresh_token=mail["refresh_token"],
+                    openai_refresh_token=result.get("refresh_token", ""), id_token=result.get("id_token", ""),
                     name=result["name"], birthdate=result["birthdate"],
                     proxy=result["proxy"], status="success_no_token",
                     error="注册成功但未获取到 token",
@@ -337,6 +340,7 @@ class RegisterEngine:
                 insert_account(
                     email=email, password=mail["password"],
                     client_id=mail["client_id"], refresh_token=mail["refresh_token"],
+                    openai_refresh_token=result.get("refresh_token", ""), id_token=result.get("id_token", ""),
                     proxy=result["proxy"], status="failed",
                     error=result["error"],
                 )
