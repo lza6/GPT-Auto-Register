@@ -48,6 +48,7 @@ def init_db() -> None:
                 access_token TEXT,
                 openai_refresh_token TEXT,
                 id_token TEXT,
+                openai_password TEXT,
                 name TEXT,
                 birthdate TEXT,
                 proxy TEXT,
@@ -86,8 +87,8 @@ def init_db() -> None:
                 value TEXT
             )
         """)
-        # 迁移：为已有 accounts 表补充 OpenAI token 字段（区分微软邮箱 token 与 OpenAI token）
-        for col in ("openai_refresh_token", "id_token"):
+        # 迁移：为已有 accounts 表补充 OpenAI token / 密码字段（区分微软邮箱凭据与 OpenAI 凭据）
+        for col in ("openai_refresh_token", "id_token", "openai_password"):
             try:
                 conn.execute(f"ALTER TABLE accounts ADD COLUMN {col} TEXT")
             except Exception:
@@ -152,15 +153,16 @@ def mark_email_status(email: str, status: str) -> None:
 def insert_account(email: str, password: str, client_id: str, refresh_token: str,
                    access_token: str = "", name: str = "", birthdate: str = "",
                    proxy: str = "", status: str = "pending", error: str = "",
-                   openai_refresh_token: str = "", id_token: str = "") -> None:
+                   openai_refresh_token: str = "", id_token: str = "",
+                   openai_password: str = "") -> None:
     conn = get_conn()
     with conn:
         conn.execute(
             """INSERT OR REPLACE INTO accounts
-               (email, password, client_id, refresh_token, access_token, openai_refresh_token, id_token, name, birthdate, proxy, status, error, registered_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (email, password, client_id, refresh_token, access_token, openai_refresh_token, id_token, openai_password, name, birthdate, proxy, status, error, registered_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (email, password, client_id, refresh_token, access_token, openai_refresh_token, id_token,
-             name, birthdate, proxy, status, error,
+             openai_password, name, birthdate, proxy, status, error,
              time.time() if status == 'success' else None),
         )
     conn.close()
@@ -228,6 +230,53 @@ def set_setting(key: str, value: str) -> None:
     with conn:
         conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
     conn.close()
+
+
+# ────────────────────────────────
+# 任务生命周期：进度落库 / 断点续跑
+# ────────────────────────────────
+
+def update_task_progress(task_id: int, completed: int = 0, failed: int = 0,
+                         skipped: int = 0, status: str = "running",
+                         result: str = "") -> None:
+    """更新任务进度（调用方传入累计值，整体覆盖）。"""
+    conn = get_conn()
+    with conn:
+        conn.execute(
+            """UPDATE tasks SET completed = ?, failed = ?, skipped = ?, status = ?,
+               result = ?, updated_at = ? WHERE id = ?""",
+            (completed, failed, skipped, status, result, time.time(), task_id),
+        )
+    conn.close()
+
+
+def get_task(task_id: int) -> dict | None:
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def get_latest_task() -> dict | None:
+    conn = get_conn()
+    row = conn.execute("SELECT * FROM tasks ORDER BY id DESC LIMIT 1").fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def reset_stale_tasks() -> int:
+    """服务启动时把遗留的 running 任务标记为 interrupted（断点续跑信号）。
+
+    emails 表按 status=pending 驱动续跑，因此已成功的账号不会重复注册。
+    """
+    conn = get_conn()
+    with conn:
+        cur = conn.execute(
+            "UPDATE tasks SET status = 'interrupted', updated_at = ? WHERE status = 'running'",
+            (time.time(),),
+        )
+    conn.close()
+    return cur.rowcount
 
 
 init_db()

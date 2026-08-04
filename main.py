@@ -9,6 +9,7 @@ from pathlib import Path
 import uvicorn
 
 from api import create_app
+from services.db import reset_stale_tasks
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 
@@ -38,6 +39,9 @@ def _init_logging() -> None:
 _init_logging()
 
 app = create_app()
+
+# 服务启动：把上次遗留的 running 任务标记为 interrupted（断点续跑信号）
+reset_stale_tasks()
 
 
 def load_config() -> dict:

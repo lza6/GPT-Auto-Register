@@ -10,10 +10,10 @@
 |------|------|
 | 🌐 **Web 控制台** | 一键管理界面，访问 `http://localhost:23457` |
 | 📧 **邮箱池管理** | 从 91kami 网址批量导入；支持手动批量添加 `邮箱----密码----client_id----refresh_token`；逐条删除 / 清空 |
-| 🤖 **注册引擎** | camoufox 浏览器自动化，邮箱 + OTP 验证码注册，自动填写姓名/年龄/生日，获取 access_token |
+| 🤖 **注册引擎** | camoufox 浏览器自动化，邮箱 + OTP 验证码注册，自动填写姓名/年龄/生日，**自动设置 OpenAI 账号密码**，获取 access_token |
 | 🛡️ **CF Solver** | 独立服务（端口 8001），Cloudflare 人机验证兜底 |
 | 🛡️ **代理池** | 支持 kookeey 动态住宅代理（每账号独立 IP）+ 通用 HTTP 代理轮询，前端可编辑保存 |
-| 📤 **一键导出账号密码** | 导出 `邮箱----密码` 清单（按邮箱去重），也可导出 chatgpt2api 兼容格式 JSON |
+| 📤 **一键导出账号密码** | 导出 `邮箱----OpenAI密码` 清单（按邮箱去重），也可导出 chatgpt2api 兼容格式 JSON |
 | 🗑️ **一键清空库** | 导出后开始新一轮，清空注册记录/邮箱池/任务（保留日志），需输入 `clear` 确认 |
 | 📝 **运行日志** | 实时查看注册过程日志，可清空 |
 | ⚙️ **系统设置** | 邮箱源 URL、注册间隔、OTP 超时、批量数量、chatgpt2api 地址等 |
@@ -101,7 +101,7 @@ GPT-Auto-Register/
 
 | 键 | 说明 | 默认 |
 |----|------|------|
-| `auth_key` | 控制台鉴权（预留） | - |
+| `auth_key` | 控制台管理密钥（/api 接口鉴权，启用后前端设置页需填写） | - |
 | `port` | 主服务端口 | `23457` |
 | `proxy_file` | 代理池文件 | `proxies.txt` |
 | `email_source_url` | 91kami 邮箱源 URL | - |
@@ -127,13 +127,19 @@ GPT-Auto-Register/
 ## ❓ 常见问题
 
 **Q: token 会过期吗？账号密码呢？**
-- 导出「账号密码清单」= 微软邮箱账号密码（`邮箱----密码`），**长期有效**，用于管理邮箱/收验证码。
-- `access_token`（OpenAI JWT）会过期。OpenAI 账号无密码（邮箱 + 验证码注册），
-  长期自动续期需要 OpenAI 的 `refresh_token`，该字段在新版本注册流程中会自动获取（见下）。
+- **账号密码（邮箱 + OpenAI 密码）长期有效**，可登录 OpenAI。新注册账号会自动设置 OpenAI 密码并存入数据库 `openai_password` 字段。
+- 老账号若用 revive 流程注册过密码，密码在 `scripts/revive_passwords.txt`，可用脚本批量导入数据库。
+- `access_token`（OpenAI JWT）会过期；`refresh_token` 可长期续期（chatgpt2api 自动刷新）。
 
 **Q: 如何让 chatgpt2api 自动续期 token？**
-新版本注册流程会通过 OAuth PKCE 在注册成功时一并获取 OpenAI 的 `access_token + refresh_token + id_token` 三件套，
-chatgpt2api 导入后即可自动刷新，无需手动续期。
+注册流程通过 OAuth PKCE 在注册成功时获取 OpenAI 的 `access_token + refresh_token + id_token` 三件套，
+chatgpt2api 导入后即可自动刷新。已有账号可用密码登录刷新（见下）。
+
+**Q: 如何验证账号是否可用？**
+`scripts/` 提供三个验证脚本：
+- `verify_all_accounts.py`：批量监测所有账号（OpenAI token + 微软邮箱），API 方式并发快速
+- `verify_account_login.py`：用账号密码登录 OpenAI，验证可用并刷新 token 三件套（`--all` 批量）
+- `verify_microsoft_login.py`：用邮箱密码登录微软账户，验证邮箱账号可用
 
 **Q: 清空库会删除什么？**
 清空「注册记录 + 邮箱池 + 任务记录」，**保留运行日志**。请先导出账号密码备份。

@@ -42,19 +42,22 @@ def _pick_account(email: str | None) -> dict:
     conn.row_factory = sqlite3.Row
     if email:
         row = conn.execute(
-            "SELECT email, password, client_id, refresh_token, access_token FROM accounts WHERE email = ?",
+            "SELECT email, password, openai_password, client_id, refresh_token, access_token FROM accounts WHERE email = ?",
             (email,),
         ).fetchone()
     else:
         row = conn.execute(
-            "SELECT email, password, client_id, refresh_token, access_token FROM accounts "
+            "SELECT email, password, openai_password, client_id, refresh_token, access_token FROM accounts "
             "WHERE status='success' AND access_token LIKE 'eyJ%' AND length(access_token) > 200 ORDER BY id LIMIT 1"
         ).fetchone()
     conn.close()
     if not row:
         print("[错误] 未找到可用账号")
         sys.exit(1)
-    return dict(row)
+    d = dict(row)
+    # 优先用 OpenAI 账号密码；无则回退数据库 password（微软邮箱密码）
+    d["login_password"] = d.get("openai_password") or d.get("password") or ""
+    return d
 
 
 def _build_authorize_url(email: str, verifier: str, challenge: str) -> str:
@@ -161,6 +164,18 @@ async def run(email: str, password: str, proxy_url: str | None, headful: bool) -
                 print(f"    access_token : {at[:36]}... (len={len(at)}, {_jwt_peek(at)})")
                 print(f"    refresh_token: {rt[:36]}... (len={len(rt)})" + ("  ← ✅" if rt else "  ← 无"))
                 print(f"    id_token     : {it[:36]}... (len={len(it)})")
+                # 回写数据库（刷新长期 token）
+                try:
+                    conn = sqlite3.connect(str(ROOT / "data" / "register.db"))
+                    conn.execute(
+                        "UPDATE accounts SET access_token=?, openai_refresh_token=?, id_token=?, status='success' WHERE email=?",
+                        (at, rt, it, email),
+                    )
+                    conn.commit()
+                    conn.close()
+                    print("   ✅ 已回写 token 到数据库 (可长期自动续期)")
+                except Exception as e:
+                    print(f"   [警告] 回写数据库失败: {e}")
             print("\n🔑 结论: 该账号密码可登录 OpenAI，账号可用。")
             return 0
 
@@ -204,20 +219,44 @@ async def run(email: str, password: str, proxy_url: str | None, headful: bool) -
 
 
 def main():
-    parser = argparse.ArgumentParser(description="用账号密码登录 OpenAI 验证账号可用性")
+    parser = argparse.ArgumentParser(description="用账号密码登录 OpenAI 验证/刷新账号 token")
     parser.add_argument("--email", default="", help="指定账号邮箱（默认取第一个标准 JWT 账号）")
+    parser.add_argument("--all", action="store_true", help="批量刷新所有有 OpenAI 密码的账号（逐个登录，耗时较长）")
     parser.add_argument("--proxy", default="", help="代理 URL（默认直连）")
     parser.add_argument("--headful", action="store_true", help="显示浏览器窗口（调试用）")
     args = parser.parse_args()
 
+    proxy = args.proxy or None
+
+    if args.all:
+        conn = sqlite3.connect(str(ROOT / "data" / "register.db"))
+        rows = conn.execute(
+            "SELECT email, openai_password, client_id, refresh_token FROM accounts "
+            "WHERE openai_password IS NOT NULL AND openai_password != '' ORDER BY id"
+        ).fetchall()
+        conn.close()
+        print(f"待批量刷新: {len(rows)} 个有 OpenAI 密码的账号\n")
+        ok = fail = 0
+        for i, (email, pw, cid, rt) in enumerate(rows, 1):
+            print(f"=== [{i}/{len(rows)}] {email} ===")
+            code = asyncio.run(run(email, pw, proxy, args.headful))
+            if code == 0:
+                ok += 1
+            else:
+                fail += 1
+            print(f"   结果: {'✅' if code == 0 else '❌'}\n")
+        print(f"批量完成: 成功 {ok}, 失败 {fail}")
+        sys.exit(0)
+
     acc = _pick_account(args.email or None)
+    pw = acc["login_password"]
     print(f"使用账号: {acc['email']}")
-    print(f"密码: {acc['password'][:4]}*** (长度 {len(acc['password'])})")
-    print(f"代理: {args.proxy or '直连'}")
+    print(f"密码: {pw[:4]}*** (长度 {len(pw)}, {'OpenAI密码' if acc.get('openai_password') else '微软邮箱密码'})")
+    print(f"代理: {proxy or '直连'}")
 
     exit_code = asyncio.run(run(
-        acc["email"], acc["password"],
-        args.proxy or None, args.headful,
+        acc["email"], pw,
+        proxy, args.headful,
     ))
     sys.exit(exit_code)
 

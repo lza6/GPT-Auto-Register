@@ -231,6 +231,10 @@ input:focus,textarea:focus{border-color:var(--accent)}
         <div class="form-group"><label>chatgpt2api 地址</label><input type="url" id="cfgC2apiUrl" placeholder="http://127.0.0.1:23456"></div>
         <div class="form-group"><label>chatgpt2api 管理密钥 (留空自动读取)</label><input type="password" id="cfgC2apiKey" placeholder="chatgpt2api admin key"></div>
       </div>
+      <div class="form-row">
+        <div class="form-group"><label>控制台管理密钥 (auth_key)</label><input type="password" id="cfgAuthKey" placeholder="config.json 的 auth_key"></div>
+        <div class="form-group"><label></label><div class="muted" style="padding-top:6px">用于 /api 接口鉴权，启用后首次访问需填写保存</div></div>
+      </div>
       <button class="btn btn-primary" onclick="saveSettings()">💾 保存设置</button>
       <button class="btn btn-ghost" onclick="openAdvanced()" style="margin-left:8px">⚙️ 高级设置</button>
     </div>
@@ -251,6 +255,7 @@ input:focus,textarea:focus{border-color:var(--accent)}
 
 <script>
 const API = '';
+let authKey = localStorage.getItem('gptAuthKey') || '';
 let pollTimer = null;
 let showPasswords = false;
 
@@ -322,7 +327,29 @@ async function refreshStatus() {
     document.getElementById('btnResume').disabled = !data.is_running || !data.is_paused;
     document.getElementById('btnStop').disabled = !data.is_running;
     updateStats(data.stats);
+    updateTask(data.task);
   } catch (e) { console.error(e); }
+}
+
+function updateTask(task) {
+  const bar = document.getElementById('progressBar');
+  const fill = document.getElementById('progressFill');
+  const text = document.getElementById('progressText');
+  if (!task || !task.total) {
+    bar.style.display = 'none'; fill.style.width = '0';
+    text.textContent = '';
+    return;
+  }
+  const done = (task.completed || 0) + (task.failed || 0) + (task.skipped || 0);
+  const pct = task.total ? Math.min(100, Math.round(done / task.total * 100)) : 0;
+  bar.style.display = 'block';
+  fill.style.width = pct + '%';
+  const statusText = task.status === 'running' ? '运行中'
+    : task.status === 'completed' ? '已完成'
+    : task.status === 'interrupted' ? '已中断'
+    : task.status === 'stopped' ? '已停止'
+    : (task.status || '');
+  text.textContent = `${statusText} · ${done}/${task.total}（成功 ${task.completed||0} · 失败 ${task.failed||0} · 跳过 ${task.skipped||0}）`;
 }
 
 function updateStats(s) {
@@ -609,6 +636,7 @@ async function loadSettings() {
     document.getElementById('cfgBatchSize').value = cfg.batch_size || 100;
     document.getElementById('cfgC2apiUrl').value = cfg.chatgpt2api_url || 'http://127.0.0.1:23456';
     document.getElementById('cfgC2apiKey').value = cfg.chatgpt2api_admin_key || '';
+    document.getElementById('cfgAuthKey').value = localStorage.getItem('gptAuthKey') || '';
   } catch (e) { console.error(e); }
 }
 
@@ -623,6 +651,7 @@ async function saveSettings() {
       { key: 'chatgpt2api_admin_key', value: document.getElementById('cfgC2apiKey').value },
     ];
     for (const s of settings) await api('/settings/', { method: 'POST', body: JSON.stringify(s) });
+    localStorage.setItem('gptAuthKey', document.getElementById('cfgAuthKey').value.trim());
     toast('设置已保存');
   } catch (e) { alert('保存失败: ' + e.message); }
 }

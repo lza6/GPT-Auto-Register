@@ -5,6 +5,7 @@ import base64
 import hashlib
 import re
 import secrets
+import string
 import time
 import uuid
 from typing import Any
@@ -32,6 +33,11 @@ def _generate_pkce() -> tuple[str, str]:
     digest = hashlib.sha256(verifier.encode()).digest()
     challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
     return verifier, challenge
+
+
+def gen_password(length: int = 16) -> str:
+    """生成 OpenAI 账号密码（随机字母数字）"""
+    return "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(length))
 
 
 class BrowserRegister:
@@ -68,12 +74,72 @@ class BrowserRegister:
             skip_code=skip_code,
         )
 
+    # ─────────────────────────────────────────────
+    # 页面形态检测 / CF 处理（配合 services.login_detector）
+    # ─────────────────────────────────────────────
+
+    async def _collect_page_inputs(self, page) -> list[str]:
+        """采集页面可见 input 的 name/type/placeholder/autocomplete。"""
+        try:
+            return await page.evaluate(
+                """() => Array.from(document.querySelectorAll('input'))
+                    .map(i => (i.name || i.type || i.placeholder || i.autocomplete) || '')
+                    .filter(Boolean).slice(0, 20)"""
+            )
+        except Exception:
+            return []
+
+    async def _page_html(self, page) -> str:
+        try:
+            return await page.content()
+        except Exception:
+            return ""
+
+    async def _page_body_text(self, page) -> str:
+        try:
+            return await page.evaluate(
+                "() => document.body ? document.body.innerText.slice(0, 500) : ''"
+            )
+        except Exception:
+            return ""
+
+    async def _try_click_turnstile(self, page) -> bool:
+        """遍历 frame 尝试点掉 Turnstile 复选框，返回是否点中。"""
+        try:
+            for frame in page.frames:
+                url = (frame.url or "").lower()
+                if "turnstile" in url or "challenges.cloudflare" in url:
+                    checkbox = frame.locator(
+                        "#challenge-stage input[type=checkbox], input[type=checkbox]"
+                    ).first
+                    if await checkbox.count():
+                        await checkbox.click(timeout=1500)
+                        return True
+        except Exception:
+            pass
+        return False
+
+    async def _resolve_cf(self, page, email: str, max_attempts: int = 3) -> bool:
+        """尝试自动解 Cloudflare 挑战（点复选框 + 等待重检），返回是否脱离挑战。"""
+        from services.login_detector import is_cf_challenge
+
+        for attempt in range(max_attempts):
+            clicked = await self._try_click_turnstile(page)
+            if clicked:
+                add_log("info", f"[{email}] 点击了 Turnstile 复选框 (第 {attempt + 1} 次)")
+                await asyncio.sleep(4)
+            if not is_cf_challenge(page.url, await self._page_html(page)):
+                return True
+            await asyncio.sleep(3)
+        return False
+
     async def register_one(self, email: str, password: str, client_id: str,
                            refresh_token: str) -> dict[str, Any]:
         """用浏览器注册单个账号"""
         result: dict[str, Any] = {
             "email": email, "status": "failed", "error": "",
             "access_token": "", "refresh_token": "", "id_token": "",
+            "openai_password": "",
             "name": "", "birthdate": "", "proxy": "",
         }
         name = name_service.generate()
@@ -171,22 +237,99 @@ class BrowserRegister:
             except Exception:
                 pass
 
-            # ── Step 2: 输入邮箱并点击继续 ──
-            add_log("info", f"[{email}] Step 2: 输入邮箱...")
-            # 等待邮箱输入框可交互
-            email_input = page.locator('input[name="email"]')
-            try:
-                await email_input.wait_for(state="visible", timeout=15000)
-            except Exception:
-                # 尝试其他选择器
-                email_input = page.locator('input[type="email"], input[placeholder*="email" i], input[id*="email" i]').first
-                try:
-                    await email_input.wait_for(state="visible", timeout=10000)
-                except Exception:
-                    await page.screenshot(path=f"debug_login_{email.split('@')[0]}.png")
-                    result["error"] = "邮箱输入框不可见"
-                    add_log("error", f"[{email}] 邮箱输入框不可见，已截图")
+            # ── Step 1.1: 页面形态检测与分流（登录页可能是邮箱/密码/验证码/CF） ──
+            # 修复：此前只识别 input[name=email]，密码页 / CF 页 / 改版页会裸超时 15s。
+            from services.login_detector import (
+                detect_login_page, decide_login_action, summarize_page_text,
+            )
+            inputs = await self._collect_page_inputs(page)
+            page_kind = detect_login_page(page.url, await self._page_html(page), inputs)
+            action = decide_login_action(page_kind)
+            add_log("info", f"[{email}] 页面形态: {page_kind} (动作: {action})")
+
+            # CF 挑战：先尝试自动解，解不了则明确标记 cf_blocked（不再裸超时）
+            if page_kind == "cf":
+                add_log("info", f"[{email}] 检测到 Cloudflare 挑战，尝试自动解...")
+                if not await self._resolve_cf(page, email):
+                    result["status"] = "cf_blocked"
+                    result["error"] = "Cloudflare 人机验证无法自动通过"
+                    add_log("warning", f"[{email}] CF 挑战未通过")
                     return result
+                inputs = await self._collect_page_inputs(page)
+                page_kind = detect_login_page(page.url, await self._page_html(page), inputs)
+                action = decide_login_action(page_kind)
+                add_log("info", f"[{email}] 解 CF 后页面形态: {page_kind}")
+
+            # 无法识别：附带页面文字摘要，便于快速适配上游改版
+            if action == "fail":
+                body_text = summarize_page_text(await self._page_body_text(page))
+                await page.screenshot(path=f"debug_unknown_{email.split('@')[0]}.png")
+                result["error"] = f"无法识别登录页: {page.url[:80]}"
+                add_log("error", f"[{email}] 无法识别登录页，页面文字: {body_text[:200]}")
+                return result
+
+            # 密码登录页：切换到邮箱验证码登录（半成品账号补完路径）
+            if action == "switch_otp_login":
+                add_log("info", f"[{email}] 密码登录页，切换邮箱验证码登录...")
+                clicked = False
+                for sel in ['button:has-text("邮箱验证码")', 'button:has-text("验证码")',
+                            'a:has-text("one-time code")', 'button:has-text("one-time code")',
+                            'button:has-text("email verification")']:
+                    try:
+                        btn = page.locator(sel).first
+                        if await btn.count():
+                            await btn.click(timeout=5000)
+                            clicked = True
+                            break
+                    except Exception:
+                        continue
+                if not clicked:
+                    result["error"] = "密码登录页但无法切换到邮箱验证码登录"
+                    add_log("error", f"[{email}] {result['error']}")
+                    return result
+                add_log("info", f"[{email}] 已切换到邮箱验证码登录")
+                await asyncio.sleep(3)
+
+            # 已位于回调页：直接捕获 OAuth code 换 token（三件套已是最终凭证）
+            if page_kind == "callback":
+                add_log("info", f"[{email}] 已在回调页，直接捕获 OAuth code 换 token...")
+                code = await self._wait_for_oauth_code(page, timeout=15)
+                if code:
+                    tokens = await self._exchange_code(code, code_verifier, proxy_url)
+                    if tokens and tokens.get("access_token"):
+                        result["access_token"] = tokens["access_token"]
+                        result["refresh_token"] = tokens.get("refresh_token", "")
+                        result["id_token"] = tokens.get("id_token", "")
+                        result["status"] = "success"
+                        add_log("info", f"[{email}] ✅ 回调页直接获取到 token 三件套")
+                        return result
+                result["error"] = "回调页但未捕获到 OAuth code"
+                add_log("error", f"[{email}] {result['error']}")
+                return result
+
+            # 已位于 about-you / 验证码页：不再输入邮箱
+            skip_email_input = action in ("wait_otp", "switch_otp_login", "skip_login")
+            already_on_about_you = page_kind == "about-you"
+
+            # ── Step 1.5: 新账号注册页（create-account/password）→ 设置 OpenAI 密码 ──
+            openai_password_set = False
+            if authorize_url and "create-account" in page.url:
+                add_log("info", f"[{email}] 检测到新账号注册页，设置 OpenAI 密码...")
+                openai_password = gen_password()
+                result["openai_password"] = openai_password
+                try:
+                    new_pw = page.locator('input[name="new-password"]')
+                    await new_pw.wait_for(state="visible", timeout=10000)
+                    await new_pw.click()
+                    await new_pw.fill("")
+                    await page.keyboard.type(openai_password, delay=30)
+                    await asyncio.sleep(0.5)
+                    await page.locator('button[type="submit"]').first.click(timeout=10000)
+                    add_log("info", f"[{email}] ✅ 已设置 OpenAI 密码 (可账号密码登录)")
+                    openai_password_set = True
+                    await asyncio.sleep(3)
+                except Exception as e:
+                    add_log("warning", f"[{email}] 设置密码失败: {e}")
 
             # 先记录当前收件箱的旧验证码（用 Graph API 直接读取）
             add_log("info", f"[{email}] 记录旧验证码...")
@@ -204,91 +347,127 @@ class BrowserRegister:
             except Exception as e:
                 add_log("warning", f"[{email}] 记录旧验证码异常: {e}")
 
-            # 用 click + type 模拟真实键盘输入（触发 Vue/React 状态更新）
-            await email_input.click()
-            await asyncio.sleep(0.3)
-            await email_input.fill("")  # 清空
-            await page.keyboard.type(email, delay=50)  # 模拟逐字输入
-            add_log("info", f"[{email}] 邮箱已输入")
-            await asyncio.sleep(1)
-
-            # 点击 Continue 按钮（确保按钮可见且可交互）
-            continue_btn = page.locator('button[type="submit"]')
-            try:
-                await continue_btn.wait_for(state="visible", timeout=10000)
-                await continue_btn.click(timeout=10000)
-            except Exception as e:
-                add_log("warning", f"[{email}] Continue 按钮点击异常: {e}，尝试 Enter...")
-                await page.keyboard.press("Enter")
-            add_log("info", f"[{email}] 已提交邮箱，等待页面跳转...")
-
-            # ── Step 3: 等待跳转到验证码页面（带重试） ──
-            add_log("info", f"[{email}] Step 3: 等待验证码页面...")
-            max_retries = 2
-            for retry in range(max_retries):
+            # ── Step 2: 输入邮箱并点击继续（已设密码 / 已在后续页面则跳过）──
+            if not openai_password_set and not skip_email_input:
+                add_log("info", f"[{email}] Step 2: 输入邮箱...")
+                email_input = page.locator('input[name="email"]')
                 try:
-                    await page.wait_for_url("**/email-verification**", timeout=30000)
-                    add_log("info", f"[{email}] 已到达验证码页面")
-                    break
+                    await email_input.wait_for(state="visible", timeout=8000)
                 except Exception:
-                    current_url = page.url
-                    add_log("warning", f"[{email}] 未到达验证码页面 (第 {retry+1} 次)，当前: {current_url[:80]}")
-                    if "email-verification" in current_url:
-                        break
-                    if retry < max_retries - 1:
-                        # 重试：重新输入邮箱并提交
-                        add_log("info", f"[{email}] 重试提交邮箱...")
-                        try:
-                            email_input2 = page.locator('input[name="email"]')
-                            await email_input2.wait_for(state="visible", timeout=10000)
-                            await email_input2.click()
-                            await email_input2.fill("")
-                            await page.keyboard.type(email, delay=50)
-                            await asyncio.sleep(0.5)
-                            continue_btn2 = page.locator('button[type="submit"]')
-                            await continue_btn2.click(timeout=10000)
-                        except Exception as e2:
-                            add_log("warning", f"[{email}] 重试提交异常: {e2}")
-                    else:
-                        result["error"] = f"页面跳转异常: {current_url[:80]}"
+                    # 尝试其他选择器
+                    email_input = page.locator('input[type="email"], input[placeholder*="email" i], input[id*="email" i]').first
+                    try:
+                        await email_input.wait_for(state="visible", timeout=8000)
+                    except Exception:
+                        await page.screenshot(path=f"debug_login_{email.split('@')[0]}.png")
+                        result["error"] = "邮箱输入框不可见"
+                        add_log("error", f"[{email}] 邮箱输入框不可见，已截图")
                         return result
 
+                # 用 click + type 模拟真实键盘输入（触发 Vue/React 状态更新）
+                await email_input.click()
+                await asyncio.sleep(0.3)
+                await email_input.fill("")  # 清空
+                await page.keyboard.type(email, delay=50)  # 模拟逐字输入
+                add_log("info", f"[{email}] 邮箱已输入")
+                await asyncio.sleep(1)
+
+                # 点击 Continue 按钮（确保按钮可见且可交互）
+                continue_btn = page.locator('button[type="submit"]')
+                try:
+                    await continue_btn.wait_for(state="visible", timeout=10000)
+                    await continue_btn.click(timeout=10000)
+                except Exception as e:
+                    add_log("warning", f"[{email}] Continue 按钮点击异常: {e}，尝试 Enter...")
+                    await page.keyboard.press("Enter")
+                add_log("info", f"[{email}] 已提交邮箱，等待页面跳转...")
+            else:
+                add_log("info", f"[{email}] 已设置密码或已在后续页面，跳过填邮箱")
+
+            # ── Step 3: 等待跳转到验证码页面（带重试；已到后续页则跳过） ──
+            if already_on_about_you:
+                add_log("info", f"[{email}] 已在 about-you 页，跳过验证码等待")
+            elif skip_email_input:
+                add_log("info", f"[{email}] Step 3: 等待验证码输入框出现...")
+                try:
+                    otp_box = page.locator('input[name="code"], input[autocomplete="one-time-code"]').first
+                    await otp_box.wait_for(state="visible", timeout=20000)
+                except Exception:
+                    add_log("warning", f"[{email}] 验证码输入框未在 20s 内出现，继续等待邮件")
+            else:
+                add_log("info", f"[{email}] Step 3: 等待验证码页面...")
+                max_retries = 2
+                for retry in range(max_retries):
+                    try:
+                        await page.wait_for_url("**/email-verification**", timeout=30000)
+                        add_log("info", f"[{email}] 已到达验证码页面")
+                        break
+                    except Exception:
+                        current_url = page.url
+                        add_log("warning", f"[{email}] 未到达验证码页面 (第 {retry+1} 次)，当前: {current_url[:80]}")
+                        if "email-verification" in current_url:
+                            break
+                        if retry < max_retries - 1:
+                            # 重试：重新输入邮箱并提交
+                            add_log("info", f"[{email}] 重试提交邮箱...")
+                            try:
+                                email_input2 = page.locator('input[name="email"]')
+                                await email_input2.wait_for(state="visible", timeout=10000)
+                                await email_input2.click()
+                                await email_input2.fill("")
+                                await page.keyboard.type(email, delay=50)
+                                await asyncio.sleep(0.5)
+                                continue_btn2 = page.locator('button[type="submit"]')
+                                await continue_btn2.click(timeout=10000)
+                            except Exception as e2:
+                                add_log("warning", f"[{email}] 重试提交异常: {e2}")
+                        else:
+                            result["error"] = f"页面跳转异常: {current_url[:80]}"
+                            return result
+
             # ── Step 4: 等待验证码邮件（用 Graph API 直接读取，跳过旧验证码） ──
-            add_log("info", f"[{email}] Step 4: 等待验证码邮件...")
-            otp_code = await self._wait_for_new_otp(
-                email, password, client_id, refresh_token, set(),
-                timeout_sec=self.otp_timeout,
-                poll_interval=self.otp_poll,
-                skip_code=old_codes.pop() if old_codes else "",
-            )
-            if not otp_code:
-                result["error"] = "验证码等待超时"
-                add_log("error", f"[{email}] {result['error']}")
-                return result
-            add_log("info", f"[{email}] 验证码获取成功: {otp_code}")
+            if already_on_about_you:
+                add_log("info", f"[{email}] 已位于 about-you 页，无需验证码邮件")
+                otp_code = ""
+            else:
+                add_log("info", f"[{email}] Step 4: 等待验证码邮件...")
+                otp_code = await self._wait_for_new_otp(
+                    email, password, client_id, refresh_token, set(),
+                    timeout_sec=self.otp_timeout,
+                    poll_interval=self.otp_poll,
+                    skip_code=old_codes.pop() if old_codes else "",
+                )
+                if not otp_code:
+                    result["error"] = "验证码等待超时"
+                    add_log("error", f"[{email}] {result['error']}")
+                    return result
+                add_log("info", f"[{email}] 验证码获取成功: {otp_code}")
 
-            # ── Step 5: 输入验证码 ──
-            add_log("info", f"[{email}] Step 5: 输入验证码...")
-            # 验证码输入框是单个 input[name="code"]，maxlength=6
-            code_input = page.locator('input[name="code"]')
-            try:
-                await code_input.wait_for(state="visible", timeout=10000)
-            except Exception:
-                # 兜底选择器
-                code_input = page.locator('input[placeholder*="code" i], input[placeholder*="Code" i]').first
-            await code_input.click()
-            await code_input.fill("")
-            await page.keyboard.type(otp_code, delay=100)
-            add_log("info", f"[{email}] 验证码已输入")
+            # ── Step 5: 输入验证码（about-you 页无验证码，跳过） ──
+            if otp_code:
+                add_log("info", f"[{email}] Step 5: 输入验证码...")
+                # 验证码输入框是单个 input[name="code"]，maxlength=6
+                code_input = page.locator('input[name="code"]')
+                try:
+                    await code_input.wait_for(state="visible", timeout=10000)
+                except Exception:
+                    # 兜底选择器
+                    code_input = page.locator('input[placeholder*="code" i], input[placeholder*="Code" i]').first
+                await code_input.click()
+                await code_input.fill("")
+                await page.keyboard.type(otp_code, delay=100)
+                add_log("info", f"[{email}] 验证码已输入")
 
-            await asyncio.sleep(0.5)
+                await asyncio.sleep(0.5)
 
-            # 点击 Continue 按钮提交
-            verify_btn = page.locator('button[type="submit"]').first
-            if await verify_btn.count() == 0:
-                verify_btn = page.locator('button:has-text("Continue"), button:has-text("Verify"), button:has-text("继续")').first
-            await verify_btn.click()
-            add_log("info", f"[{email}] 已提交验证码")
+                # 点击 Continue 按钮提交
+                verify_btn = page.locator('button[type="submit"]').first
+                if await verify_btn.count() == 0:
+                    verify_btn = page.locator('button:has-text("Continue"), button:has-text("Verify"), button:has-text("继续")').first
+                await verify_btn.click()
+                add_log("info", f"[{email}] 已提交验证码")
+            else:
+                add_log("info", f"[{email}] 无验证码需要输入（已在 about-you 页）")
 
             # ── Step 6: 等待跳转到 about-you 页面（带重试） ──
             add_log("info", f"[{email}] Step 6: 等待 about-you 页面...")

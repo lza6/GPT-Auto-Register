@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from services.db import (
     add_log, get_pending_emails, get_accounts, get_stats,
-    get_setting, set_setting, get_conn,
+    get_setting, set_setting, get_conn, get_latest_task,
 )
 from services.register_engine import get_engine
 from services.email_service import email_service
@@ -109,6 +109,7 @@ async def register_status() -> dict:
         "is_paused": engine.is_paused,
         "stats": stats,
         "proxy_count": proxy_service.count,
+        "task": get_latest_task(),
     }
 
 
@@ -266,6 +267,7 @@ async def export_credentials() -> dict:
         accounts.append({
             "email": email,
             "password": a.get("password") or "",
+            "openai_password": a.get("openai_password") or "",
             "client_id": a.get("client_id") or "",
             "refresh_token": a.get("refresh_token") or "",
             "access_token": a.get("access_token") or "",
@@ -274,7 +276,10 @@ async def export_credentials() -> dict:
             "status": a.get("status") or "",
             "registered_at": a.get("registered_at"),
         })
-    text = "\n".join(f"{a['email']}----{a['password']}" for a in accounts)
+    # 账号密码清单优先用 OpenAI 密码（可登录 OpenAI），无则回退微软邮箱密码
+    text = "\n".join(
+        f"{a['email']}----{(a.get('openai_password') or a.get('password') or '')}" for a in accounts
+    )
     return {"success": True, "accounts": accounts, "total": len(accounts), "text": text}
 
 
