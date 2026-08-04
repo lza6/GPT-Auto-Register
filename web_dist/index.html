@@ -1,0 +1,738 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GPT 自动注册 - 控制台</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+:root{--bg:#0f172a;--card:#1e293b;--border:#334155;--text:#e2e8f0;--text2:#94a3b8;--accent:#3b82f6;--green:#22c55e;--red:#ef4444;--yellow:#eab308;--orange:#f97316}
+body{font-family:"SF Pro Display","PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+.header{background:var(--card);border-bottom:1px solid var(--border);padding:16px 24px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:10}
+.header h1{font-size:20px;font-weight:700}
+.header .status{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.badge{padding:4px 12px;border-radius:20px;font-size:12px;font-weight:600}
+.badge.running{background:var(--green);color:#000}
+.badge.paused{background:var(--yellow);color:#000}
+.badge.stopped{background:var(--red);color:#fff}
+.container{max-width:1440px;margin:0 auto;padding:24px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:16px;margin-bottom:24px}
+.stat-card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;text-align:center}
+.stat-card .value{font-size:32px;font-weight:800;margin-bottom:4px}
+.stat-card .label{font-size:13px;color:var(--text2)}
+.stat-card.green .value{color:var(--green)}
+.stat-card.red .value{color:var(--red)}
+.stat-card.blue .value{color:var(--accent)}
+.stat-card.yellow .value{color:var(--yellow)}
+.stat-card.orange .value{color:var(--orange)}
+.panel{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;margin-bottom:24px}
+.panel h2{font-size:16px;font-weight:700;margin-bottom:16px;display:flex;align-items:center;gap:8px}
+.btn{padding:9px 18px;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer;transition:all .15s;display:inline-flex;align-items:center;gap:6px}
+.btn-primary{background:var(--accent);color:#fff}
+.btn-primary:hover{background:#2563eb}
+.btn-success{background:var(--green);color:#000}
+.btn-success:hover{background:#16a34a}
+.btn-warning{background:var(--yellow);color:#000}
+.btn-warning:hover{background:#ca8a04}
+.btn-danger{background:var(--red);color:#fff}
+.btn-danger:hover{background:#dc2626}
+.btn-ghost{background:transparent;border:1px solid var(--border);color:var(--text2)}
+.btn-ghost:hover{border-color:var(--accent);color:var(--accent)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn-sm{padding:4px 10px;font-size:12px;border-radius:6px}
+.controls{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+.controls .grow{flex:1}
+.tabs{display:flex;gap:0;border-bottom:1px solid var(--border);margin-bottom:20px;flex-wrap:wrap}
+.tab{padding:10px 20px;cursor:pointer;font-size:14px;font-weight:600;color:var(--text2);border-bottom:2px solid transparent;transition:all .15s}
+.tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+.tab:hover{color:var(--text)}
+.tab-content{display:none}
+.tab-content.active{display:block}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--border);vertical-align:top}
+th{color:var(--text2);font-weight:600;font-size:12px;text-transform:uppercase;white-space:nowrap}
+tr:hover{background:rgba(59,130,246,.05)}
+.tag{padding:2px 8px;border-radius:4px;font-size:11px;font-weight:600;white-space:nowrap}
+.tag.success{background:rgba(34,197,94,.2);color:var(--green)}
+.tag.failed{background:rgba(239,68,68,.2);color:var(--red)}
+.tag.pending{background:rgba(234,179,8,.2);color:var(--yellow)}
+.tag.skipped{background:rgba(148,163,184,.2);color:var(--text2)}
+.tag.cf{background:rgba(249,115,22,.2);color:var(--orange)}
+.tag.used{background:rgba(34,197,94,.15);color:var(--green)}
+.tag.danger{background:rgba(239,68,68,.2);color:var(--red)}
+.log-box{background:#0a0f1a;border:1px solid var(--border);border-radius:8px;padding:12px;height:340px;overflow-y:auto;font-family:Consolas,monospace;font-size:12px;line-height:1.8}
+.log-box .log-info{color:var(--text2)}
+.log-box .log-warning{color:var(--yellow)}
+.log-box .log-error{color:var(--red)}
+.log-box .log-time{color:#475569}
+input[type=text],input[type=number],input[type=url],input[type=password],textarea{background:#0a0f1a;border:1px solid var(--border);border-radius:8px;padding:10px 14px;color:var(--text);font-size:14px;width:100%;outline:none;font-family:inherit}
+textarea{font-family:Consolas,monospace;font-size:12px;resize:vertical;min-height:120px}
+input:focus,textarea:focus{border-color:var(--accent)}
+.form-group{margin-bottom:16px}
+.form-group label{display:block;font-size:13px;color:var(--text2);margin-bottom:6px;font-weight:600}
+.form-row{display:flex;gap:16px;flex-wrap:wrap}
+.form-row .form-group{flex:1;min-width:200px}
+.mono{font-family:Consolas,monospace;font-size:11px;word-break:break-all}
+.copyable{cursor:pointer;color:var(--accent)}
+.copyable:hover{text-decoration:underline}
+.ellipsis{display:inline-block;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:bottom}
+.empty{text-align:center;padding:40px;color:var(--text2)}
+.muted{color:var(--text2);font-size:12px}
+.pw-mask{color:var(--text2);letter-spacing:2px}
+.switch-row{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text2);margin-bottom:12px;cursor:pointer}
+.switch-row input{width:auto;accent-color:var(--accent)}
+.row-actions{display:flex;gap:6px;flex-wrap:wrap}
+.row-actions .btn{padding:3px 8px;font-size:11px}
+/* 弹窗 */
+.overlay{display:none;position:fixed;inset:0;background:rgba(2,6,23,.7);z-index:100;align-items:center;justify-content:center;padding:20px}
+.overlay.show{display:flex}
+.modal{background:var(--card);border:1px solid var(--border);border-radius:12px;max-width:680px;width:100%;max-height:85vh;overflow-y:auto;padding:24px}
+.modal h3{font-size:17px;font-weight:700;margin-bottom:16px}
+.modal .modal-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:16px}
+.modal .close-x{float:right;background:none;border:none;color:var(--text2);font-size:20px;cursor:pointer;line-height:1}
+.hint{background:rgba(59,130,246,.08);border:1px solid rgba(59,130,246,.25);border-radius:8px;padding:10px 12px;font-size:12px;color:var(--text2);margin-bottom:12px;line-height:1.7}
+.hint code{background:rgba(148,163,184,.15);padding:1px 5px;border-radius:4px}
+.warn{background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.3);border-radius:8px;padding:10px 12px;font-size:13px;color:var(--red);margin-bottom:12px;line-height:1.7}
+.progress-bar{background:var(--border);border-radius:8px;height:8px;overflow:hidden;margin-top:8px;display:none}
+.progress-bar .fill{background:var(--accent);height:100%;border-radius:8px;transition:width .3s;width:0}
+#toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px 18px;font-size:13px;z-index:200;display:none;box-shadow:0 4px 20px rgba(0,0,0,.4)}
+@media(max-width:768px){.form-row{flex-direction:column}.grid{grid-template-columns:repeat(3,1fr)}}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>🤖 GPT 自动注册控制台</h1>
+  <div class="status">
+    <span id="statusBadge" class="badge stopped">已停止</span>
+    <span id="proxyInfo" style="font-size:12px;color:var(--text2)"></span>
+    <label class="switch-row" style="margin:0"><input type="checkbox" id="showPw" onchange="togglePw()">显示密码</label>
+  </div>
+</div>
+
+<div class="container">
+
+  <!-- 统计卡片 -->
+  <div class="grid">
+    <div class="stat-card blue"><div class="value" id="sEmailsTotal">0</div><div class="label">邮箱总数</div></div>
+    <div class="stat-card yellow"><div class="value" id="sEmailsPending">0</div><div class="label">待注册</div></div>
+    <div class="stat-card green"><div class="value" id="sAccountsSuccess">0</div><div class="label">注册成功</div></div>
+    <div class="stat-card red"><div class="value" id="sAccountsFailed">0</div><div class="label">注册失败</div></div>
+    <div class="stat-card orange"><div class="value" id="sAccountsSkipped">0</div><div class="label">已跳过</div></div>
+    <div class="stat-card blue"><div class="value" id="sAccountsTotal">0</div><div class="label">账号总数</div></div>
+  </div>
+
+  <!-- 操作控制 -->
+  <div class="panel">
+    <h2>⚡ 操作控制</h2>
+    <div class="controls">
+      <button class="btn btn-success" id="btnImport" onclick="openImport()">📥 导入邮箱</button>
+      <button class="btn btn-primary" onclick="openManualAdd()">✍️ 手动添加邮箱</button>
+      <button class="btn btn-primary" id="btnStart" onclick="startRegister()">▶️ 开始注册</button>
+      <button class="btn btn-warning" id="btnPause" onclick="controlRegister('pause')" disabled>⏸️ 暂停</button>
+      <button class="btn btn-primary" id="btnResume" onclick="controlRegister('resume')" disabled>▶️ 继续</button>
+      <button class="btn btn-danger" id="btnStop" onclick="controlRegister('stop')" disabled>⏹️ 停止</button>
+      <button class="btn btn-primary" onclick="exportTokens()">📋 导出 Token</button>
+      <button class="btn btn-primary" onclick="openExportAccounts()">📤 导出账号</button>
+      <button class="btn btn-danger" onclick="openClear()" style="margin-left:auto">🗑️ 一键清空库</button>
+    </div>
+    <div class="progress-bar" id="progressBar"><div class="fill" id="progressFill"></div></div>
+    <div id="progressText" style="font-size:12px;color:var(--text2);margin-top:8px"></div>
+  </div>
+
+  <!-- 标签页 -->
+  <div class="tabs">
+    <div class="tab active" onclick="switchTab('accounts',this)">📋 注册记录</div>
+    <div class="tab" onclick="switchTab('emails',this)">📧 邮箱池</div>
+    <div class="tab" onclick="switchTab('proxies',this)">🛡️ 代理池</div>
+    <div class="tab" onclick="switchTab('logs',this)">📝 运行日志</div>
+    <div class="tab" onclick="switchTab('settings',this)">⚙️ 设置</div>
+  </div>
+
+  <!-- 注册记录 -->
+  <div class="tab-content active" id="tab-accounts">
+    <div class="panel">
+      <h2>注册记录 <button class="btn btn-ghost btn-sm" onclick="loadAccounts()">刷新</button>
+        <button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="loadAccounts()">共 <span id="accCount">0</span> 条</button>
+      </h2>
+      <div style="overflow-x:auto">
+      <table>
+        <thead><tr><th>#</th><th>邮箱</th><th>密码</th><th>姓名</th><th>生日</th><th>状态</th><th>代理</th><th>Token</th><th>错误</th><th>时间</th></tr></thead>
+        <tbody id="accountsBody"></tbody>
+      </table>
+      </div>
+      <div id="accountsEmpty" class="empty" style="display:none">暂无注册记录</div>
+    </div>
+  </div>
+
+  <!-- 邮箱池 -->
+  <div class="tab-content" id="tab-emails">
+    <div class="panel">
+      <h2>邮箱池 <button class="btn btn-ghost btn-sm" onclick="loadEmails()">刷新</button>
+        <button class="btn btn-primary btn-sm" onclick="openManualAdd()">✍️ 手动添加</button>
+        <button class="btn btn-danger btn-sm" onclick="clearEmails()" style="margin-left:auto">清空邮箱池</button>
+      </h2>
+      <div class="hint">邮箱池是微软邮箱账号，用于接收注册验证码。格式：<code>邮箱----密码----client_id----refresh_token</code>（每行一个，可从 91kami 导出或手动粘贴）。</div>
+      <div style="overflow-x:auto">
+      <table>
+        <thead><tr><th>#</th><th>邮箱</th><th>密码</th><th>client_id</th><th>refresh_token</th><th>状态</th><th>导入时间</th><th>操作</th></tr></thead>
+        <tbody id="emailsBody"></tbody>
+      </table>
+      </div>
+      <div id="emailsEmpty" class="empty" style="display:none">暂无邮箱数据</div>
+    </div>
+  </div>
+
+  <!-- 代理池 -->
+  <div class="tab-content" id="tab-proxies">
+    <div class="panel">
+      <h2>代理池 <button class="btn btn-ghost btn-sm" onclick="loadProxies()">刷新</button>
+        <button class="btn btn-primary btn-sm" onclick="openProxyEditor()" style="margin-left:auto">✏️ 编辑代理池</button>
+      </h2>
+      <div class="hint">
+        支持两种格式（每行一个）：<br>
+        · kookeey 动态住宅代理：<code>gate.kookeey.info:1000:用户ID-子用户:密码-国家</code>（自动动态切换 IP，推荐）<br>
+        · 通用 HTTP 代理：<code>http://ip:port</code> 或 <code>ip:port:user:pass</code>（按行轮询使用）
+      </div>
+      <div class="stats-mini" id="proxyStats"></div>
+      <div style="overflow-x:auto;margin-top:12px">
+      <table>
+        <thead><tr><th>#</th><th>代理</th><th>类型</th></tr></thead>
+        <tbody id="proxiesBody"></tbody>
+      </table>
+      </div>
+      <div id="proxiesEmpty" class="empty" style="display:none">代理池为空</div>
+    </div>
+  </div>
+
+  <!-- 日志 -->
+  <div class="tab-content" id="tab-logs">
+    <div class="panel">
+      <h2>运行日志 <button class="btn btn-ghost btn-sm" onclick="loadLogs()">刷新</button>
+        <button class="btn btn-danger btn-sm" onclick="clearLogs()" style="margin-left:auto">清空日志</button>
+      </h2>
+      <div class="log-box" id="logBox"></div>
+    </div>
+  </div>
+
+  <!-- 设置 -->
+  <div class="tab-content" id="tab-settings">
+    <div class="panel">
+      <h2>系统设置</h2>
+      <div class="form-row">
+        <div class="form-group"><label>邮箱源 URL (91kami)</label><input type="url" id="cfgEmailSource" placeholder="https://mai.91kami.com/cpd/..."></div>
+        <div class="form-group"><label>注册间隔 (秒)</label><input type="number" id="cfgInterval" value="10" min="1"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>验证码等待超时 (秒)</label><input type="number" id="cfgOtpTimeout" value="120" min="30"></div>
+        <div class="form-group"><label>批量数量 (0=全部)</label><input type="number" id="cfgBatchSize" value="100" min="0"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>chatgpt2api 地址</label><input type="url" id="cfgC2apiUrl" placeholder="http://127.0.0.1:23456"></div>
+        <div class="form-group"><label>chatgpt2api 管理密钥 (留空自动读取)</label><input type="password" id="cfgC2apiKey" placeholder="chatgpt2api admin key"></div>
+      </div>
+      <button class="btn btn-primary" onclick="saveSettings()">💾 保存设置</button>
+      <button class="btn btn-ghost" onclick="openAdvanced()" style="margin-left:8px">⚙️ 高级设置</button>
+    </div>
+  </div>
+
+</div>
+
+<!-- 弹窗容器 -->
+<div class="overlay" id="overlay">
+  <div class="modal" id="modal">
+    <button class="close-x" onclick="closeModal()">✕</button>
+    <div id="modalTitle"></div>
+    <div id="modalBody"></div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const API = '';
+let pollTimer = null;
+let showPasswords = false;
+
+function escapeHtml(s) {
+  if (s === null || s === undefined) return '';
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  })[c]);
+}
+
+async function api(path, opts = {}) {
+  const resp = await fetch(API + '/api' + path, {
+    headers: { 'Content-Type': 'application/json' },
+    ...opts,
+  });
+  if (!resp.ok) {
+    let msg = 'HTTP ' + resp.status;
+    try { const j = await resp.json(); msg = j.detail || msg; } catch(e) {}
+    throw new Error(msg);
+  }
+  return resp.json();
+}
+
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.display = 'block';
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.style.display = 'none', 2500);
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text || '');
+    toast('已复制');
+  } catch(e) {
+    const ta = document.createElement('textarea');
+    ta.value = text || ''; document.body.appendChild(ta);
+    ta.select(); document.execCommand('copy'); ta.remove();
+    toast('已复制');
+  }
+}
+
+// ── 弹窗 ──
+function openModal(title, bodyHtml) {
+  document.getElementById('modalTitle').innerHTML = '<h3>' + title + '</h3>';
+  document.getElementById('modalBody').innerHTML = bodyHtml;
+  document.getElementById('overlay').classList.add('show');
+}
+function closeModal() {
+  document.getElementById('overlay').classList.remove('show');
+}
+
+// ── 状态轮询 ──
+async function refreshStatus() {
+  try {
+    const data = await api('/register/status');
+    const badge = document.getElementById('statusBadge');
+    if (data.is_running && !data.is_paused) {
+      badge.textContent = '运行中'; badge.className = 'badge running';
+    } else if (data.is_paused) {
+      badge.textContent = '已暂停'; badge.className = 'badge paused';
+    } else {
+      badge.textContent = '已停止'; badge.className = 'badge stopped';
+    }
+    document.getElementById('proxyInfo').textContent = '代理: ' + (data.proxy_count || 0) + ' 条';
+    document.getElementById('btnStart').disabled = data.is_running;
+    document.getElementById('btnPause').disabled = !data.is_running || data.is_paused;
+    document.getElementById('btnResume').disabled = !data.is_running || !data.is_paused;
+    document.getElementById('btnStop').disabled = !data.is_running;
+    updateStats(data.stats);
+  } catch (e) { console.error(e); }
+}
+
+function updateStats(s) {
+  if (!s) return;
+  document.getElementById('sEmailsTotal').textContent = s.emails_total || 0;
+  document.getElementById('sEmailsPending').textContent = s.emails_pending || 0;
+  document.getElementById('sAccountsSuccess').textContent = s.accounts_success || 0;
+  document.getElementById('sAccountsFailed').textContent = s.accounts_failed || 0;
+  document.getElementById('sAccountsSkipped').textContent = s.accounts_skipped || 0;
+  document.getElementById('sAccountsTotal').textContent = s.accounts_total || 0;
+}
+
+function copyFrom(el) {
+  copyText(el.dataset.full);
+}
+
+function pwCell(v) {
+  if (!v) return '-';
+  return showPasswords
+    ? `<span class="copyable mono" title="点击复制" data-full="${escapeHtml(v)}" onclick="copyFrom(this)">${escapeHtml(v)}</span>`
+    : '<span class="pw-mask">••••••</span>';
+}
+
+function tokenCell(v) {
+  if (!v) return '-';
+  return `<span class="mono ellipsis copyable" title="${escapeHtml(v)}" data-full="${escapeHtml(v)}" onclick="copyFrom(this)">${escapeHtml(v.slice(0,28))}…</span>`;
+}
+
+// ── 导入邮箱 ──
+function openImport() {
+  const src = document.getElementById('cfgEmailSource').value || '';
+  openModal('📥 导入邮箱', `
+    <div class="form-group"><label>邮箱源 URL (91kami)</label>
+      <input type="url" id="impUrl" placeholder="https://mai.91kami.com/cpd/..." value="${escapeHtml(src)}"></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeModal()">取消</button>
+      <button class="btn btn-success" onclick="importEmails()">开始导入</button>
+    </div>`);
+}
+async function importEmails() {
+  const url = document.getElementById('impUrl').value.trim();
+  const btn = document.getElementById('btnImport');
+  btn.disabled = true; btn.textContent = '导入中...';
+  try {
+    const data = await api('/register/import-emails', { method: 'POST', body: JSON.stringify({ source_url: url }) });
+    closeModal();
+    toast(`导入完成: 新增 ${data.data.inserted}, 跳过 ${data.data.skipped}`);
+    refreshStatus();
+  } catch (e) { alert('导入失败: ' + e.message); }
+  btn.disabled = false; btn.textContent = '📥 导入邮箱';
+}
+
+// ── 手动添加邮箱 ──
+function openManualAdd() {
+  openModal('✍️ 手动添加邮箱', `
+    <div class="hint">每行一个邮箱，格式：<code>邮箱----密码----client_id----refresh_token</code>。也可以只填邮箱（密码等留空）。</div>
+    <div class="form-group"><label>邮箱列表</label>
+      <textarea id="manualEmails" style="min-height:220px" placeholder="xxx@outlook.com----密码----client_id----refresh_token"></textarea></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeModal()">取消</button>
+      <button class="btn btn-success" onclick="submitManualAdd()">添加</button>
+    </div>`);
+}
+async function submitManualAdd() {
+  const text = document.getElementById('manualEmails').value;
+  if (!text.trim()) { alert('内容为空'); return; }
+  try {
+    const data = await api('/emails/manual-add', { method: 'POST', body: JSON.stringify({ text }) });
+    closeModal();
+    toast(`已添加 ${data.inserted} 个邮箱, 跳过 ${data.skipped} 个`);
+    refreshStatus(); loadEmails();
+  } catch (e) { alert('添加失败: ' + e.message); }
+}
+
+// ── 注册控制 ──
+async function startRegister() {
+  const count = parseInt(document.getElementById('cfgBatchSize').value) || 0;
+  try {
+    const data = await api('/register/start', { method: 'POST', body: JSON.stringify({ count }) });
+    toast(`注册任务已启动，共 ${data.total} 个邮箱`);
+  } catch (e) { alert(e.message || '启动失败'); }
+}
+async function controlRegister(action) {
+  try {
+    await api('/register/control', { method: 'POST', body: JSON.stringify({ action }) });
+    refreshStatus();
+  } catch (e) { alert('操作失败: ' + e.message); }
+}
+
+// ── 导出 / 清空 ──
+async function exportTokens() {
+  try {
+    const data = await api('/register/accounts/export');
+    if (data.count === 0) { toast('暂无 token'); return; }
+    await copyText(data.tokens.join('\n'));
+    toast(`已复制 ${data.count} 个 token 到剪贴板`);
+  } catch (e) { alert('导出失败: ' + e.message); }
+}
+
+function openClear() {
+  openModal('🗑️ 一键清空库', `
+    <div class="warn">⚠️ 该操作将<b>永久删除</b>：注册记录（accounts）、邮箱池（emails）、任务记录（tasks）。运行日志将保留。建议先「导出 Token」备份。</div>
+    <div class="form-group"><label>输入 <b>clear</b> 确认清空</label>
+      <input type="text" id="clearConfirm" placeholder="输入 clear"></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeModal()">取消</button>
+      <button class="btn btn-danger" onclick="confirmClear()" id="btnConfirmClear">确认清空</button>
+    </div>`);
+}
+async function confirmClear() {
+  const v = document.getElementById('clearConfirm').value.trim();
+  if (v !== 'clear') { toast('请先输入 clear 确认'); return; }
+  const btn = document.getElementById('btnConfirmClear');
+  btn.disabled = true;
+  try {
+    const data = await api('/register/clear', { method: 'POST', body: '{}' });
+    closeModal();
+    toast(`已清空: 注册记录 ${data.deleted.accounts}, 邮箱 ${data.deleted.emails}, 任务 ${data.deleted.tasks}`);
+    refreshStatus(); loadAccounts(); loadEmails();
+  } catch (e) { alert('清空失败: ' + e.message); }
+  btn.disabled = false;
+}
+
+// ── 注册记录 ──
+async function loadAccounts() {
+  try {
+    const data = await api('/register/accounts?limit=200');
+    const tbody = document.getElementById('accountsBody');
+    const empty = document.getElementById('accountsEmpty');
+    document.getElementById('accCount').textContent = data.accounts ? data.accounts.length : 0;
+    if (!data.accounts || data.accounts.length === 0) {
+      tbody.innerHTML = ''; empty.style.display = 'block'; return;
+    }
+    empty.style.display = 'none';
+    tbody.innerHTML = data.accounts.map((a, i) => {
+      const statusTag =
+        a.status === 'success' ? '<span class="tag success">成功</span>'
+        : a.status === 'failed' ? '<span class="tag failed">失败</span>'
+        : a.status === 'cf_blocked' ? '<span class="tag cf">CF拦截</span>'
+        : a.status === 'skipped' ? '<span class="tag skipped">跳过</span>'
+        : a.status === 'success_no_token' ? '<span class="tag success">成功(无token)</span>'
+        : '<span class="tag pending">待处理</span>';
+      const time = a.registered_at ? new Date(a.registered_at * 1000).toLocaleString() : '-';
+      return `<tr>
+        <td>${i + 1}</td>
+        <td class="mono">${escapeHtml(a.email)}</td>
+        <td>${pwCell(a.password)}</td>
+        <td>${escapeHtml(a.name || '-')}</td>
+        <td>${escapeHtml(a.birthdate || '-')}</td>
+        <td>${statusTag}</td>
+        <td class="mono">${escapeHtml(a.proxy || '直连')}</td>
+        <td>${tokenCell(a.access_token)}</td>
+        <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis">${escapeHtml(a.error || '-')}</td>
+        <td style="white-space:nowrap">${time}</td>
+      </tr>`;
+    }).join('');
+  } catch (e) { console.error(e); }
+}
+
+// ── 邮箱池 ──
+async function loadEmails() {
+  try {
+    const data = await api('/emails/?limit=500');
+    const tbody = document.getElementById('emailsBody');
+    const empty = document.getElementById('emailsEmpty');
+    if (!data.emails || data.emails.length === 0) {
+      tbody.innerHTML = ''; empty.style.display = 'block'; return;
+    }
+    empty.style.display = 'none';
+    tbody.innerHTML = data.emails.map((e, i) => {
+      const statusTag = e.status === 'pending' ? '<span class="tag pending">待注册</span>'
+        : e.status === 'used' ? '<span class="tag used">已使用</span>'
+        : '<span class="tag skipped">' + escapeHtml(e.status) + '</span>';
+      const time = e.created_at ? new Date(e.created_at * 1000).toLocaleString() : '-';
+      return `<tr>
+        <td>${i + 1}</td>
+        <td class="mono">${escapeHtml(e.email)}</td>
+        <td>${pwCell(e.password)}</td>
+        <td>${tokenCell(e.client_id)}</td>
+        <td>${tokenCell(e.refresh_token)}</td>
+        <td>${statusTag}</td>
+        <td style="white-space:nowrap">${time}</td>
+        <td><button class="btn btn-danger btn-sm" onclick="deleteEmail(${e.id})">删除</button></td>
+      </tr>`;
+    }).join('');
+  } catch (e) { console.error(e); }
+}
+
+async function deleteEmail(id) {
+  if (!confirm('确定删除该邮箱？')) return;
+  try {
+    await api('/emails/' + id, { method: 'DELETE' });
+    toast('已删除');
+    loadEmails(); refreshStatus();
+  } catch (e) { alert('删除失败: ' + e.message); }
+}
+
+async function clearEmails() {
+  if (!confirm('确定清空整个邮箱池？')) return;
+  try {
+    const data = await api('/emails/clear', { method: 'POST', body: '{}' });
+    toast('已清空 ' + data.deleted + ' 个邮箱');
+    loadEmails(); refreshStatus();
+  } catch (e) { alert('清空失败: ' + e.message); }
+}
+
+// ── 代理池 ──
+async function loadProxies() {
+  try {
+    const data = await api('/proxies/');
+    const body = document.getElementById('proxiesBody');
+    const empty = document.getElementById('proxiesEmpty');
+    document.getElementById('proxyStats').innerHTML =
+      '<span class="muted">共 <b>' + data.count + '</b> 条配置（有效 ' + data.active_count + ' 条）</span>';
+    const lines = data.content.split('\n').filter(l => l.trim() && !l.trim().startsWith('#'));
+    if (lines.length === 0) { body.innerHTML = ''; empty.style.display = 'block'; return; }
+    empty.style.display = 'none';
+    body.innerHTML = lines.slice(0, 100).map((l, i) => {
+      const type = /^[^:]+:[^:]+:[^:]+-[^:]+:[^:]+-/.test(l.trim()) ? '<span class="tag cf">kookeey动态</span>' : '<span class="tag success">HTTP</span>';
+      return `<tr><td>${i + 1}</td><td class="mono">${escapeHtml(l)}</td><td>${type}</td></tr>`;
+    }).join('') + (lines.length > 100 ? `<tr><td colspan="3" class="muted">… 还有 ${lines.length - 100} 条未显示，点击「编辑代理池」查看全部</td></tr>` : '');
+  } catch (e) { console.error(e); }
+}
+
+function openProxyEditor() {
+  api('/proxies/').then(data => {
+    openModal('✏️ 编辑代理池', `
+      <div class="hint">每行一个代理。kookeey：<code>gate.kookeey.info:1000:用户ID-子用户:密码-国家</code>；通用：<code>ip:port:user:pass</code> 或 <code>http://ip:port</code>。保存后立即生效。</div>
+      <div class="form-group"><label>代理列表（当前 ${data.count} 条）</label>
+        <textarea id="proxyContent" style="min-height:280px">${escapeHtml(data.content)}</textarea></div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" onclick="clearProxies()">清空</button>
+        <button class="btn btn-ghost" onclick="closeModal()">取消</button>
+        <button class="btn btn-success" onclick="saveProxies()">保存</button>
+      </div>`);
+  });
+}
+async function saveProxies() {
+  const content = document.getElementById('proxyContent').value;
+  try {
+    const data = await api('/proxies/', { method: 'POST', body: JSON.stringify({ content }) });
+    closeModal();
+    toast('代理池已保存: ' + data.count + ' 条');
+    loadProxies(); refreshStatus();
+  } catch (e) { alert('保存失败: ' + e.message); }
+}
+async function clearProxies() {
+  if (!confirm('确定清空代理池？')) return;
+  try {
+    const data = await api('/proxies/', { method: 'POST', body: JSON.stringify({ content: '' }) });
+    closeModal();
+    toast('代理池已清空');
+    loadProxies(); refreshStatus();
+  } catch (e) { alert('失败: ' + e.message); }
+}
+
+// ── 日志 ──
+async function loadLogs() {
+  try {
+    const data = await api('/logs?limit=1000');
+    const box = document.getElementById('logBox');
+    if (!data.logs || data.logs.length === 0) { box.innerHTML = '<div class="log-info">暂无日志</div>'; return; }
+    box.innerHTML = data.logs.map(l => {
+      const time = new Date(l.created_at * 1000).toLocaleTimeString();
+      const cls = l.level === 'error' ? 'log-error' : l.level === 'warning' ? 'log-warning' : 'log-info';
+      return `<div class="${cls}"><span class="log-time">[${time}]</span> ${escapeHtml(l.message)}</div>`;
+    }).reverse().join('');
+    box.scrollTop = box.scrollHeight;
+  } catch (e) { console.error(e); }
+}
+async function clearLogs() {
+  if (!confirm('确定清空日志？')) return;
+  try { await api('/logs/clear', { method: 'POST', body: '{}' }); loadLogs(); toast('日志已清空'); }
+  catch (e) { alert('清空失败: ' + e.message); }
+}
+
+// ── 设置 ──
+async function loadSettings() {
+  try {
+    const cfg = await api('/settings/config');
+    document.getElementById('cfgEmailSource').value = cfg.email_source_url || '';
+    document.getElementById('cfgInterval').value = cfg.register_interval_sec || 10;
+    document.getElementById('cfgOtpTimeout').value = cfg.otp_wait_timeout_sec || 120;
+    document.getElementById('cfgBatchSize').value = cfg.batch_size || 100;
+    document.getElementById('cfgC2apiUrl').value = cfg.chatgpt2api_url || 'http://127.0.0.1:23456';
+    document.getElementById('cfgC2apiKey').value = cfg.chatgpt2api_admin_key || '';
+  } catch (e) { console.error(e); }
+}
+
+async function saveSettings() {
+  try {
+    const settings = [
+      { key: 'email_source_url', value: document.getElementById('cfgEmailSource').value },
+      { key: 'register_interval_sec', value: document.getElementById('cfgInterval').value },
+      { key: 'otp_wait_timeout_sec', value: document.getElementById('cfgOtpTimeout').value },
+      { key: 'batch_size', value: document.getElementById('cfgBatchSize').value },
+      { key: 'chatgpt2api_url', value: document.getElementById('cfgC2apiUrl').value },
+      { key: 'chatgpt2api_admin_key', value: document.getElementById('cfgC2apiKey').value },
+    ];
+    for (const s of settings) await api('/settings/', { method: 'POST', body: JSON.stringify(s) });
+    toast('设置已保存');
+  } catch (e) { alert('保存失败: ' + e.message); }
+}
+
+// ── 导出账号密码 ──
+let exportTextCache = '';
+
+function openExportAccounts() {
+  openModal('📤 导出账号密码', `
+    <div class="hint">账号密码是长期资产。默认导出格式：<code>邮箱----密码</code>（每行一个，按邮箱去重）。点「chatgpt2api 格式」则导出含 access_token 的 JSON。</div>
+    <div class="controls" style="margin-bottom:12px">
+      <button class="btn btn-success" onclick="loadCredExport()">🔍 账号密码清单</button>
+      <button class="btn btn-ghost" onclick="loadC2apiExport()">📤 chatgpt2api 格式</button>
+      <button class="btn btn-primary" onclick="copyExportText()">📋 复制</button>
+      <button class="btn btn-primary" onclick="downloadExportText()">⬇️ 下载</button>
+    </div>
+    <div id="exportStats" class="muted" style="margin-bottom:8px"></div>
+    <div class="form-group"><label>导出内容</label><textarea id="exportText" readonly style="min-height:240px"></textarea></div>
+    <div class="modal-actions"><button class="btn btn-ghost" onclick="closeModal()">关闭</button></div>`);
+  loadCredExport();
+}
+
+async function loadCredExport() {
+  document.getElementById('exportStats').textContent = '正在生成账号密码清单...';
+  try {
+    const data = await api('/register/export-credentials', { method: 'POST', body: '{}' });
+    exportTextCache = data.text || '';
+    document.getElementById('exportText').value = exportTextCache;
+    document.getElementById('exportStats').textContent = `✅ 共 ${data.total} 个账号密码`;
+  } catch (e) {
+    document.getElementById('exportStats').textContent = '生成失败: ' + e.message;
+  }
+}
+
+async function loadC2apiExport() {
+  document.getElementById('exportStats').textContent = '正在生成 chatgpt2api 格式...';
+  try {
+    const data = await api('/register/export-accounts', { method: 'POST', body: '{}' });
+    exportTextCache = JSON.stringify(data.accounts, null, 2);
+    document.getElementById('exportText').value = exportTextCache;
+    document.getElementById('exportStats').textContent = `✅ chatgpt2api 格式 ${data.accounts.length} 个账号`;
+  } catch (e) {
+    document.getElementById('exportStats').textContent = '生成失败: ' + e.message;
+  }
+}
+
+function copyExportText() {
+  if (!exportTextCache) { toast('请先点击生成'); return; }
+  copyText(exportTextCache);
+}
+
+function downloadExportText() {
+  if (!exportTextCache) { toast('请先点击生成'); return; }
+  const blob = new Blob([exportTextCache], { type: 'text/plain;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = '账号密码.txt';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function openAdvanced() {
+  api('/settings/config').then(cfg => {
+    const rows = Object.entries(cfg).map(([k, v]) =>
+      `<tr><td class="mono">${escapeHtml(k)}</td><td class="mono">${escapeHtml(v)}</td></tr>`).join('');
+    openModal('⚙️ 高级设置（只读）', `
+      <div class="hint">config.json 完整配置。需要修改请编辑服务器上的 config.json 后重启。</div>
+      <div style="overflow-x:auto"><table>
+        <thead><tr><th>键</th><th>值</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="2" class="muted">空配置</td></tr>'}</tbody>
+      </table></div>
+      <div class="modal-actions"><button class="btn btn-ghost" onclick="closeModal()">关闭</button></div>`);
+  });
+}
+
+// ── 通用 ──
+function togglePw() {
+  showPasswords = document.getElementById('showPw').checked;
+  loadAccounts(); loadEmails();
+}
+
+function switchTab(name, el) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+  if (el) el.classList.add('active');
+  document.getElementById('tab-' + name).classList.add('active');
+  if (name === 'accounts') loadAccounts();
+  else if (name === 'emails') loadEmails();
+  else if (name === 'proxies') loadProxies();
+  else if (name === 'logs') loadLogs();
+  else if (name === 'settings') loadSettings();
+}
+
+// ── 轮询 ──
+function startPolling() {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(() => {
+    refreshStatus();
+    loadAccounts();
+    loadLogs();
+  }, 3000);
+}
+
+// ── 初始化 ──
+refreshStatus();
+loadAccounts();
+loadLogs();
+loadSettings();
+startPolling();
+</script>
+
+</body>
+</html>

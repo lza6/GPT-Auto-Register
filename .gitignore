@@ -1,0 +1,37 @@
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+graft/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+
+# 数据 & 日志
+data/
+*.db
+*.db-wal
+*.db-shm
+*.log
+*.png
+
+# 敏感配置 & 代理凭据
+config.json
+proxies.txt
+proxies_kookeey.txt
+
+# 导出 / 账号文件
+已经获取到的token.txt
+获取到的所有邮箱.txt
+
+# scripts 数据（卡密 / 账号 / 结果）
+scripts/*.txt
+scripts/*.json
+scripts/*.jsonl
+
+# 参考资料（大目录）
+参考材料/
+
+# 系统
+.DS_Store
+Thumbs.db

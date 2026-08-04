@@ -1,0 +1,79 @@
+from __future__ import annotations
+
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+
+from services.db import get_pending_emails, count_emails, insert_email, get_conn
+
+router = APIRouter()
+
+
+class ManualAddRequest(BaseModel):
+    """手动批量添加邮箱。每行格式: 邮箱----密码----client_id----refresh_token"""
+    text: str = ""
+
+
+@router.get("/pending")
+async def pending_emails(limit: int = 100) -> dict:
+    emails = get_pending_emails(limit=limit)
+    return {"emails": emails, "total": count_emails("pending")}
+
+
+@router.get("/")
+async def list_emails(status: str = "") -> dict:
+    conn = get_conn()
+    if status:
+        rows = conn.execute("SELECT * FROM emails WHERE status = ? ORDER BY id DESC", (status,)).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM emails ORDER BY id DESC").fetchall()
+    conn.close()
+    return {"emails": [dict(r) for r in rows], "total": len(rows)}
+
+
+@router.post("/manual-add")
+async def manual_add(req: ManualAddRequest) -> dict:
+    """手动批量添加邮箱（支持 91kami 格式多行粘贴）"""
+    if not req.text.strip():
+        raise HTTPException(400, "内容为空")
+    inserted = 0
+    skipped = 0
+    for line in req.text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("----")
+        if len(parts) < 1:
+            skipped += 1
+            continue
+        email = parts[0].strip()
+        password = parts[1].strip() if len(parts) > 1 else ""
+        client_id = parts[2].strip() if len(parts) > 2 else ""
+        refresh_token = parts[3].strip() if len(parts) > 3 else ""
+        if not email:
+            skipped += 1
+            continue
+        if insert_email(email, password, client_id, refresh_token):
+            inserted += 1
+        else:
+            skipped += 1
+    return {"success": True, "inserted": inserted, "skipped": skipped, "total": inserted + skipped}
+
+
+@router.delete("/{email_id}")
+async def delete_email(email_id: int) -> dict:
+    conn = get_conn()
+    with conn:
+        cur = conn.execute("DELETE FROM emails WHERE id = ?", (email_id,))
+    conn.close()
+    if cur.rowcount == 0:
+        raise HTTPException(404, "邮箱不存在")
+    return {"success": True}
+
+
+@router.post("/clear")
+async def clear_emails() -> dict:
+    conn = get_conn()
+    with conn:
+        cur = conn.execute("DELETE FROM emails")
+    conn.close()
+    return {"success": True, "deleted": cur.rowcount}
