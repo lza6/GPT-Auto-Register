@@ -45,6 +45,19 @@
 
 > 服务异常退出会自动重启（最多无限次，关闭窗口即停止）。
 
+> **v2.0.4 起，双击 `启动.bat` 闪退问题已修复**。根因是 Windows cmd 在中文路径 + GBK 代码页下解析 UTF-8 中文 bat 字节错位，叠加 Git for Windows 的 GNU `timeout.exe` 劫持 PATH 导致 `timeout /t N` 报错。修复方案：bat 全文纯 ASCII + `ping` 替代 `timeout` + `%SystemRoot%\System32\chcp.com` 绝对路径。详见 [ADR-004](docs/ADR/ADR-004.md)。
+
+### 🔧 双击启动排障
+
+| 症状 | 原因 | 解决 |
+|------|------|------|
+| 双击 `启动.bat` 窗口一闪而过 | v2.0.3 及更早版本在中文路径 + GBK 代码页下中文字节错位 | 升级到 v2.0.4+（`git pull` 或下载最新 Release） |
+| 双击后 cmd 报 `invalid time interval '/t'` | Git for Windows 的 GNU `timeout.exe` 排在 System32 前，劫持了 `timeout` 命令 | v2.0.4+ 已用 `ping` 替代；旧版可临时把 `C:\Windows\System32` 提到 PATH 最前 |
+| 端口 23457/8001 起不来 | 上次进程残留占用端口 | 双击 `停止.bat`，或手动 `taskkill /F /IM python.exe` |
+| CF Solver 8001 起不来 | camoufox 浏览器数据未就绪 | 查看 `logs/cf_solver.log`；首次运行把 `camoufox-*-win.x86_64.zip` 放 `tools\camoufox\` 后重试 |
+| 主服务起来但访问 23457 报错 | 检查 `data/logs/server.log` 与 `logs/cf_solver.log` | 按 [ADR-004](docs/ADR/ADR-004.md) 排查 |
+| Python 未找到 | 未装 Python 3.11+ | 从 https://www.python.org/downloads/ 安装，勾选 "Add to PATH" |
+
 ### 使用流程
 
 1. **添加邮箱**：在「邮箱池」页点「✍️ 手动添加」，粘贴 `邮箱----密码----client_id----refresh_token`（每行一个）；或在设置里配置 91kami 邮箱源 URL 后点「📥 导入邮箱」

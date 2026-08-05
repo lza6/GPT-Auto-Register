@@ -79,3 +79,40 @@
 | 2026-08-05 | 修复审查 | #2 stop竞态(_stop_requested)、#3 try_start异常释放、#4 browser _as_int、#5 指数退避、#7 死代码、#9 _as_bool数字、#10 import位置、#8 异常隔离测试——全部修复 |
 | 2026-08-05 | 用户决定 | #1 前端鉴权适配、#6 验证码脱敏 → 用户明确不做，跳过（不影响功能） |
 | 2026-08-05 | 终验 | 190 项测试全绿 + 语法校验通过；HTML 报告 docs/CHANGE_REPORT_v2.0.html |
+| 2026-08-05 | v2.0.4 | 修复双击 启动.bat 闪退：根因双重（UTF-8 无 BOM 含中文→GBK 错位 + GNU timeout 劫持）；修复=纯 ASCII + ping 替代 timeout + %SystemRoot%\System32\chcp.com；验证 os.startfile main=True cf=True |
+| 2026-08-05 | v2.0.4 治理 | ADR-004 + .specify/specs/v2.0.4-bat-crash-fix/（spec/plan/tasks）+ .claude/skills/bat-encoding-hardening（仓库副本 docs/skills/）+ README 排障段 + HTML 报告 v2.0.4 |
+| 2026-08-05 | v2.0.4 验证 | 字节级非ASCII=0；os.startfile 双击模拟 main=True cf=True 端口 23457/8001 Listen；未动后端→190项无需重跑 |
+
+## 七、复现坑记录（防下次重蹈）
+
+> **本节记录本轮复现"双击闪退"时踩的方法论坑，避免下轮改 bat 类问题时重蹈。**
+
+- `subprocess.Popen(["cmd","/c",bat], cwd=中文路径)`：CreateProcessW 传中文 cwd 会乱码 → 找不到 bat → 报"不是内部或外部命令"。**不要用**测双击。
+- `cmd /c "带空格的中文路径"`：shell 切词，路径被空格切碎 → 触发 PATH 上的 `art.exe`/`gh.exe` 等无关命令。
+- Git Bash → cmd 的 cwd 中文传递：系统性破坏（`cd /d C:\gptreg` 后 cwd 仍是乱码原始路径）。
+- **真实双击模拟唯一可靠方法**：`os.startfile(bat, "open")`（ShellExecuteW，等同资源管理器双击）。
+- `Get-Process python | Where StartTime -gt ...`：PowerShell 变量在 Bash 传递时符号被吃（unsetenv），用 `taskkill /F /IM python.exe` 更稳。
+- 端口杀不干净：8001 处于 Bound（非 Listen）时 `findstr LISTENING` 过滤会漏杀 → 去掉 LISTENING 过滤覆盖所有状态。
+
+## 八、v2.0.4 任务闭环状态
+
+| 任务 | 状态 | 证据 |
+|------|------|------|
+| T1 启动.bat 纯 ASCII | ✅ | 非 ASCII=0 |
+| T2 timeout→ping（3 处） | ✅ | 启动.bat L32/L140/L173 |
+| T3 chcp 绝对路径 | ✅ | 启动.bat L4 |
+| T4 停止.bat 同步 | ✅ | 停止.bat L2 |
+| T5 字节级验证 | ✅ | 非 ASCII=0 |
+| T6 os.startfile 双击验证 | ✅ | main=True cf=True |
+| T7 端口 Listen | ✅ | 23457/8001 |
+| T8 cf_solver.log 新日志 | ✅ | 21:23 时间戳 |
+| T9 spec.md | ✅ | .specify/specs/v2.0.4-bat-crash-fix/spec.md |
+| T10 plan.md | ✅ | 同上 plan.md |
+| T11 tasks.md | ✅ | 同上 tasks.md |
+| T12 ADR-004 | ✅ | docs/ADR/ADR-004.md + 索引更新 |
+| T13 README 排障段 | ✅ | README.md 双击启动排障表 |
+| T14 workflow_status 更新 | ✅ | 本节 |
+| T15 可复用 skill | ✅ | .claude/skills/bat-encoding-hardening/ + docs/skills/ 副本 |
+| T16 记忆点标注 | ✅ | memory gpt-auto-register-v2-state.md v2.0.4 段 |
+| T17 HTML 报告 v2.0.4 | ✅ | docs/CHANGE_REPORT_v2.0.4.html |
+| T18 验收测验 | ✅ | 嵌入 HTML 报告（6 题） |

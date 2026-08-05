@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GPT 自动注册 v2.0.4 — 变更报告与验收测验</title>
+<style>
+:root{--bg:#0f172a;--card:#1e293b;--border:#334155;--text:#e2e8f0;--text2:#94a3b8;--accent:#3b82f6;--green:#22c55e;--red:#ef4444;--yellow:#eab308}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:"SF Pro Display","PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text);line-height:1.7;padding:0 0 60px}
+.wrap{max-width:920px;margin:0 auto;padding:24px}
+header{background:linear-gradient(135deg,#1e293b,#0f172a);border-bottom:1px solid var(--border);padding:40px 24px;text-align:center}
+header h1{font-size:28px;margin-bottom:8px}
+header .sub{color:var(--text2);font-size:14px}
+.badge{display:inline-block;padding:3px 12px;border-radius:20px;font-size:12px;font-weight:600;margin:0 4px}
+.badge.green{background:rgba(34,197,94,.2);color:var(--green)}
+.badge.blue{background:rgba(59,130,246,.2);color:var(--accent)}
+h2{font-size:20px;margin:32px 0 14px;color:var(--accent);border-left:4px solid var(--accent);padding-left:10px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;margin-bottom:16px}
+.card h3{font-size:16px;margin-bottom:10px}
+ul{margin-left:20px}
+li{margin-bottom:6px}
+code{background:rgba(148,163,184,.15);padding:1px 6px;border-radius:4px;font-family:Consolas,monospace;font-size:13px}
+.tag{display:inline-block;padding:1px 8px;border-radius:4px;font-size:11px;font-weight:600;margin-right:6px}
+.tag.safe{background:rgba(34,197,94,.2);color:var(--green)}
+.tag.fix{background:rgba(234,179,8,.2);color:var(--yellow)}
+table{width:100%;border-collapse:collapse;font-size:13px;margin:10px 0}
+th,td{padding:8px 10px;text-align:left;border-bottom:1px solid var(--border)}
+th{color:var(--text2);font-weight:600}
+.quiz{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;margin-bottom:12px}
+.quiz .q{font-weight:700;margin-bottom:10px}
+.quiz .opt{display:block;width:100%;text-align:left;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-bottom:6px;color:var(--text);font-size:14px;cursor:pointer;transition:all .15s}
+.quiz .opt:hover{border-color:var(--accent)}
+.quiz .opt.correct{background:rgba(34,197,94,.15);border-color:var(--green)}
+.quiz .opt.wrong{background:rgba(239,68,68,.15);border-color:var(--red)}
+.quiz .result{font-size:13px;margin-top:8px;min-height:20px}
+#score{position:fixed;bottom:20px;right:20px;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px 16px;font-size:13px;box-shadow:0 4px 20px rgba(0,0,0,.4)}
+.muted{color:var(--text2);font-size:12px}
+@media(max-width:600px){.wrap{padding:16px}header h1{font-size:22px}}
+</style>
+</head>
+<body>
+<header>
+  <h1>🤖 GPT 自动注册 · v2.0.4 变更报告</h1>
+  <div class="sub">双击 启动.bat 闪退修复 · 终局闭环审计 · 2026-08-05</div>
+  <div style="margin-top:12px">
+    <span class="badge green">双击闪退已修复</span>
+    <span class="badge blue">纯 ASCII + ping 替代</span>
+    <span class="badge blue">ADR-004 落地</span>
+  </div>
+</header>
+
+<div class="wrap">
+
+<h2>一、上下文（Context）</h2>
+<div class="card">
+<p>本项目<b>已在生产部署</b>。v2.0.3 发布后用户报告"<b>双击 启动.bat 闪退</b>"——窗口一闪而过，3 秒内退出，日志来不及写。</p>
+<p style="margin-top:8px">本次 v2.0.4 做了一次<b>部署可用性专项终局审计</b>：聚焦双击启动路径的编码陷阱与命令劫持，定位双重根因并修复，补齐治理资产（ADR-004 + spec/plan/tasks + 可复用 skill），同步 README 排障段。</p>
+</div>
+
+<h2>二、直觉（Intuition）</h2>
+<div class="card">
+<p>核心判断：<b>"我的复现方法失败 ≠ 用户没遇到 bug"</b>。逐条推导：</p>
+<ul>
+  <li><b>第一直觉错的</b>：看到系统 cmd <code>chcp</code> 显示 65001，断定"UTF-8 中文 bat 没问题"。但 <code>subprocess.Popen</code> 启的 cmd 是纯净默认代码页（936），双击用的 cmd 也是默认——<b>65001 是某个 profile 改的，不代表真实双击环境</b>。</li>
+  <li><b>复现方法系统性踩坑</b>：<code>subprocess.Popen(["cmd","/c",bat])</code> 在中文路径下 cwd 传递乱码；<code>cmd /c "带空格路径"</code> 被 shell 切词；Git Bash→cmd 的 cwd 中文传递系统性破坏。最终用 <code>os.startfile</code>（ShellExecuteW）才真实复现双击。</li>
+  <li><b>根因双重</b>：① UTF-8 无 BOM 含中文 → cmd 按 GBK 读取中文字节错位 → <code>cd /d "%~dp0"</code> 失败 → rc=255；② GNU <code>timeout.exe</code> 劫持 PATH → <code>timeout /t N</code> 报 <code>invalid time interval '/t'</code>。</li>
+  <li><b>修复必须字节级</b>：只把中文译英文不够，必须验证非 ASCII 字节数=0；只修 <code>timeout</code> 不够，<code>chcp</code> 也要绝对路径免疫。</li>
+</ul>
+</div>
+
+<h2>三、做了什么（What Was Done）</h2>
+
+<div class="card">
+<h3>🛡️ 双击闪退根因修复（CRITICAL）</h3>
+<ul>
+  <li><span class="tag safe">纯 ASCII</span><code>启动.bat</code>/<code>停止.bat</code> 全文转纯 ASCII（中文 rem/echo 译英文），任何代码页下字节一致，免疫 GBK 错位</li>
+  <li><span class="tag safe">timeout → ping</span><code>timeout /t N /nobreak >nul</code> → <code>ping -n N+1 127.0.0.1 >nul</code>（3 处），免疫 GNU coreutils <code>timeout.exe</code> 劫持</li>
+  <li><span class="tag safe">chcp 绝对路径</span><code>chcp 65001</code> → <code>%SystemRoot%\System32\chcp.com 65001</code>，免疫 PATH 劫持</li>
+</ul>
+</div>
+
+<div class="card">
+<h3>📚 治理资产补建</h3>
+<ul>
+  <li><span class="tag fix">ADR-004</span>记录"启动脚本编码与命令劫持防御基线"决策，含背景/决策/后果/替代方案/验证</li>
+  <li><span class="tag fix">Spec-Kit 流程</span><code>.specify/specs/v2.0.4-bat-crash-fix/</code> 建立 spec/plan/tasks，需求→任务全覆盖映射</li>
+  <li><span class="tag fix">可复用 skill</span><code>.claude/skills/bat-encoding-hardening/SKILL.md</code>，封装三条硬规则+检查清单+反例正例</li>
+  <li><span class="tag fix">README 排障段</span>补充"双击启动排障"表格，覆盖 6 种症状→原因→解决</li>
+</ul>
+</div>
+
+<div class="card">
+<h3>✅ 真实验证</h3>
+<ul>
+  <li><span class="tag safe">字节级</span><code>启动.bat</code>/<code>停止.bat</code> 非 ASCII 字节数 = 0</li>
+  <li><span class="tag safe">行为级</span><code>os.startfile</code> 真实双击模拟 → <code>main=True cf=True</code>，端口 23457/8001 均 Listen</li>
+  <li><span class="tag safe">日志</span><code>cf_solver.log</code> 产生新日志，浏览器引擎 <code>Pool siap: 1 halaman</code> 初始化成功</li>
+  <li><span class="tag safe">回归</span>上轮 190 项 pytest 全绿（本轮未动后端代码，无需重跑）</li>
+</ul>
+</div>
+
+<h2>四、验收测验（请完成，检验你的理解）</h2>
+<p class="muted" style="margin-bottom:12px">点击选项作答，全部答对即通过本次变更验收。右上角实时显示得分。</p>
+
+<div id="quiz-container"></div>
+<div id="score">得分：0 / 6</div>
+
+<script>
+const quiz = [
+  {q:"双击 启动.bat 闪退（rc=255）的根因是？",
+   opts:["Python 版本不对","bat 是 UTF-8 无 BOM 含中文，cmd 按 GBK 读取中文字节错位破坏词法，cd /d \"%~dp0\" 失败","电脑内存不足",".venv 损坏"], correct:1},
+  {q:"为什么 timeout /t N /nobreak 在某些环境会报 'invalid time interval'？",
+   opts:["Windows 不支持 timeout 命令","Git for Windows 的 GNU coreutils timeout.exe 劫持 PATH，把 /t 当 Unix 参数解析","bat 语法错误","需要管理员权限"], correct:1},
+  {q:"修复后 timeout /t N /nobreak >nul 被替换成什么？",
+   opts:["ping -n N+1 127.0.0.1 >nul（ping 发 N+1 个包间隔 1 秒，实际等 N 秒，与 timeout 对齐）","ping -n N 127.0.0.1 >nul","sleep N","wait N"], correct:0},
+  {q:"为什么 chcp 65001 要写成 %SystemRoot%\\System32\\chcp.com 65001？",
+   opts:["更短的写法","免疫 PATH 劫持——绝对路径不依赖 PATH 顺序，防止 GNU 工具劫持","为了跨平台","PowerShell 兼容"], correct:1},
+  {q:"如何真实模拟用户双击 .bat 的行为？",
+   opts:["subprocess.Popen(['cmd','/c',bat])","os.startfile(bat, 'open')（ShellExecuteW，等同双击）","cmd /c '带空格的中文路径'","用 Git Bash 运行"], correct:1},
+  {q:"为什么 subprocess.Popen(['cmd','/c',bat]) 不能真实复现双击？",
+   opts:["CreateProcessW 传中文 cwd 会乱码，且多层 shell 转换破坏中文路径传递","它太慢","它不能重定向输出","它需要管理员"], correct:0},
+];
+let score = 0, answered = 0;
+const container = document.getElementById('quiz-container');
+quiz.forEach((item, idx) => {
+  const div = document.createElement('div');
+  div.className = 'quiz';
+  let optsHtml = item.opts.map((o, oi) =>
+    `<button class="opt" data-q="${idx}" data-o="${oi}">${String.fromCharCode(65+oi)}. ${o}</button>`).join('');
+  div.innerHTML = `<div class="q">Q${idx+1}. ${item.q}</div>${optsHtml}<div class="result"></div>`;
+  container.appendChild(div);
+});
+document.querySelectorAll('.opt').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const q = +btn.dataset.q, o = +btn.dataset.o, item = quiz[q];
+    const result = btn.parentElement.querySelector('.result');
+    const opts = btn.parentElement.querySelectorAll('.opt');
+    if (opts[0].classList.contains('correct') || opts[0].classList.contains('wrong')) return;
+    if (o === item.correct) {
+      btn.classList.add('correct'); score++; result.textContent = '✅ 正确'; result.style.color = 'var(--green)';
+    } else {
+      btn.classList.add('wrong'); opts[item.correct].classList.add('correct');
+      result.textContent = '❌ 错误，正确答案已标绿'; result.style.color = 'var(--red)';
+    }
+    answered++;
+    document.getElementById('score').textContent = `得分：${score} / ${quiz.length}`;
+  });
+});
+</script>
+
+</div>
+</body>
+</html>
