@@ -1083,9 +1083,18 @@ def _auto_install():
 
 
 def _camoufox_data_exists():
+    # Linux/macOS 旧路径
     d1 = os.path.join(os.path.expanduser("~"), ".camoufox")
     d2 = os.path.join(os.path.expanduser("~"), ".cache", "camoufox")
-    return (os.path.isdir(d1) and bool(os.listdir(d1))) or (os.path.isdir(d2) and bool(os.listdir(d2)))
+    if (os.path.isdir(d1) and bool(os.listdir(d1))) or (os.path.isdir(d2) and bool(os.listdir(d2))):
+        return True
+    # Windows: camoufox 实际安装到 user_cache_dir -> %LOCALAPPDATA%\camoufox\camoufox\Cache
+    try:
+        from camoufox.pkgman import INSTALL_DIR
+        browsers_dir = INSTALL_DIR / "browsers"
+        return browsers_dir.is_dir() and bool(list(browsers_dir.iterdir()))
+    except Exception:
+        return False
 
 
 def _check_xvfb(headless: bool):

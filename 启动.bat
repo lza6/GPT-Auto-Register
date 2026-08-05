@@ -105,10 +105,12 @@ if exist requirements.txt (
 )
 
 rem Check camoufox browser data downloaded (needed by CF solver / browser fallback)
-"%VENV_PY%" -c "import os; d1=os.path.join(os.path.expanduser('~'),'.camoufox'); d2=os.path.join(os.path.expanduser('~'),'.cache','camoufox'); exit(0 if (os.path.isdir(d1) and os.listdir(d1)) or (os.path.isdir(d2) and os.listdir(d2)) else 1)" 2>nul
+rem NOTE: real install dir on Windows is %LOCALAPPDATA%\camoufox\camoufox\Cache (camoufox.pkgman.INSTALL_DIR), NOT ~/.camoufox
+"%VENV_PY%" -c "from camoufox.pkgman import INSTALL_DIR; b=INSTALL_DIR/'browsers'; exit(0 if (b.is_dir() and list(b.iterdir())) else 1)" 2>nul
 if errorlevel 1 (
-    echo       Downloading camoufox browser data...
-    "%VENV_PY%" -m camoufox fetch 2>nul
+    echo       Downloading camoufox browser data (first run, ~900MB)...
+    for /f "delims=" %%T in ('gh auth token 2^>nul') do set "GITHUB_TOKEN=%%T"
+    "%VENV_PY%" -m camoufox fetch
     if errorlevel 1 (
         echo [WARN] camoufox data download failed
     )
@@ -126,14 +128,24 @@ if not exist "web_dist" mkdir web_dist
 :backend
 rem ---------- 5/6 Start CF Solver ----------
 echo [5/6] Starting CF Solver (port %CF_PORT%)...
-start /b "" "%VENV_PY%" cf_solver\boterdrop_wrapper.py >nul 2>nul
-timeout /t 3 /nobreak >nul
+if not exist "logs" mkdir logs
+for /f "delims=" %%T in ('gh auth token 2^>nul') do set "GITHUB_TOKEN=%%T"
+start /b "" "%VENV_PY%" cf_solver\boterdrop_wrapper.py >>logs\cf_solver.log 2>&1
+rem Poll up to 40s instead of fixed 3s (browser engine init can take a while)
+set "CF_WAIT=0"
+:cf_wait
+timeout /t 2 /nobreak >nul
+set /a CF_WAIT+=2
 netstat -ano | findstr LISTENING | findstr /c:":%CF_PORT% " >nul 2>nul
-if errorlevel 1 (
-    echo [WARN] CF Solver may not have started, CF verification will be unavailable
-) else (
-    echo       CF Solver started OK
-)
+if not errorlevel 1 goto :cf_ok
+if !CF_WAIT! LSS 40 goto :cf_wait
+echo [WARN] CF Solver did not start within %CF_WAIT% s, CF verification may be unavailable
+echo       Check logs\cf_solver.log for details
+if exist "logs\cf_solver.log" powershell -NoProfile -Command "Get-Content 'logs\cf_solver.log' -Tail 20"
+goto :cf_done
+:cf_ok
+echo       CF Solver started OK
+:cf_done
 
 rem ---------- 6/6 Start main service ----------
 echo [6/6] Starting GPT Auto Register (port %APP_PORT%)...
