@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GPT 自动注册 v2.0 — 变更报告与验收测验</title>
+<style>
+:root{--bg:#0f172a;--card:#1e293b;--border:#334155;--text:#e2e8f0;--text2:#94a3b8;--accent:#3b82f6;--green:#22c55e;--red:#ef4444;--yellow:#eab308}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:"SF Pro Display","PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text);line-height:1.7;padding:0 0 60px}
+.wrap{max-width:920px;margin:0 auto;padding:24px}
+header{background:linear-gradient(135deg,#1e293b,#0f172a);border-bottom:1px solid var(--border);padding:40px 24px;text-align:center}
+header h1{font-size:28px;margin-bottom:8px}
+header .sub{color:var(--text2);font-size:14px}
+.badge{display:inline-block;padding:3px 12px;border-radius:20px;font-size:12px;font-weight:600;margin:0 4px}
+.badge.green{background:rgba(34,197,94,.2);color:var(--green)}
+.badge.blue{background:rgba(59,130,246,.2);color:var(--accent)}
+h2{font-size:20px;margin:32px 0 14px;color:var(--accent);border-left:4px solid var(--accent);padding-left:10px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;margin-bottom:16px}
+.card h3{font-size:16px;margin-bottom:10px}
+ul{margin-left:20px}
+li{margin-bottom:6px}
+code{background:rgba(148,163,184,.15);padding:1px 6px;border-radius:4px;font-family:Consolas,monospace;font-size:13px}
+.tag{display:inline-block;padding:1px 8px;border-radius:4px;font-size:11px;font-weight:600;margin-right:6px}
+.tag.safe{background:rgba(34,197,94,.2);color:var(--green)}
+.tag.fix{background:rgba(234,179,8,.2);color:var(--yellow)}
+.tag.perf{background:rgba(59,130,246,.2);color:var(--accent)}
+.tag.ui{background:rgba(249,115,22,.2);color:#f97316}
+table{width:100%;border-collapse:collapse;font-size:13px;margin:10px 0}
+th,td{padding:8px 10px;text-align:left;border-bottom:1px solid var(--border)}
+th{color:var(--text2);font-weight:600}
+/* 测验 */
+.quiz{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:20px;margin-bottom:12px}
+.quiz .q{font-weight:700;margin-bottom:10px}
+.quiz .opt{display:block;width:100%;text-align:left;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-bottom:6px;color:var(--text);font-size:14px;cursor:pointer;transition:all .15s}
+.quiz .opt:hover{border-color:var(--accent)}
+.quiz .opt.correct{background:rgba(34,197,94,.15);border-color:var(--green)}
+.quiz .opt.wrong{background:rgba(239,68,68,.15);border-color:var(--red)}
+.quiz .result{font-size:13px;margin-top:8px;min-height:20px}
+#score{position:fixed;bottom:20px;right:20px;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px 16px;font-size:13px;box-shadow:0 4px 20px rgba(0,0,0,.4)}
+.muted{color:var(--text2);font-size:12px}
+@media(max-width:600px){.wrap{padding:16px}header h1{font-size:22px}}
+</style>
+</head>
+<body>
+<header>
+  <h1>🤖 GPT 自动注册 · v2.0 变更报告</h1>
+  <div class="sub">终局闭环总审计 · 变更说明 + 验收测验 · 2026-08-05</div>
+  <div style="margin-top:12px">
+    <span class="badge green">190 项测试全绿</span>
+    <span class="badge blue">覆盖率 69%</span>
+    <span class="badge blue">v2.0.0 Released</span>
+  </div>
+</header>
+
+<div class="wrap">
+
+<h2>一、上下文（Context）</h2>
+<div class="card">
+<p>这是<b>已在生产部署</b>的 GPT（OpenAI/ChatGPT）账号批量注册管理系统：Web 控制台 + 协议/浏览器注册引擎 + 邮箱池 + 代理池 + chatgpt2api 对接。v1 时代"能跑"，但存在一批<b>只会在真实生产才暴露</b>的隐患。</p>
+<p style="margin-top:8px">本次把 v1 → <b>v2.0</b>，并做了一次<b>终局闭环总审计</b>：三路审计子代理（后端/前端契约/部署）+ 独立复验线程，对全部代码做"最狠反向审判"，发现并修复了大量此前遗漏的<b>伪闭环、竞态、硬编码凭据、契约断裂、O(N²)、体验断裂</b>问题。</p>
+</div>
+
+<h2>二、直觉（Intuition）</h2>
+<div class="card">
+<p>核心判断：<b>"看起来能用" ≠ "生产可用"</b>。逐条推导出关键风险：</p>
+<ul>
+  <li><b>伪安全</b>：`auth_key` 为占位符时默认裸奔 → 一旦部署到公网，refresh_token（长期资产）、账号密码、代理账密全部可读可写。</li>
+  <li><b>竞态</b>：两个并发「开始注册」都能通过 `is_running` 检查 → 同一批邮箱重复注册、重复触发 OTP。</li>
+  <li><b>凭据泄漏</b>：验证码明文写日志（经 /api/logs 可查）、脚本硬编码 `chatgpt2api` 弱密钥、`_get_chatgpt2api_admin_key` 静默回退弱密钥。</li>
+  <li><b>类型脆弱</b>：settings 接口把数字存成字符串，前端清空输入框存 `""` → `int("true")`/`int("")` 直接崩溃，后台任务卡死"运行中"。</li>
+  <li><b>契约断裂</b>：FastAPI 0.141 惰性路由下 `/api/logs`（无尾斜杠）404；export-accounts 失败被前端误报成功。</li>
+  <li><b>性能</b>：分页 total 全表装载、refresh_all O(N²)、导出串行刷新、前端 3 秒轮询全量日志。</li>
+</ul>
+</div>
+
+<h2>三、做了什么（What Was Done）</h2>
+
+<div class="card">
+<h3>🔒 安全加固（CRITICAL 全修）</h3>
+<ul>
+  <li><span class="tag safe">强制鉴权</span><code>auth_enforced=true</code> + 占位符密钥 → 服务<b>启动即失败</b>（fail-fast），杜绝假安全</li>
+  <li><span class="tag safe">环境注入</span>支持 <code>GPT_REGISTER_AUTH_KEY</code> / <code>GPT_REGISTER_AUTH_ENFORCED</code> 环境变量，零改 config 启用鉴权</li>
+  <li><span class="tag safe">凭据治理</span>proxy_chain kookeey 账密从 <code>proxies.txt</code> 解析；全部脚本 + API 移除硬编码 <code>chatgpt2api</code> 弱密钥</li>
+  <li><span class="tag safe">日志脱敏</span>验证码不再明文写日志（4 处）</li>
+  <li><span class="tag safe">清空保护</span><code>confirm='clear'</code> 服务端确认 + 自动备份到 <code>data/backups/</code>（保留 7 份）</li>
+  <li><span class="tag safe">白名单</span>settings 接口只允许白名单键，禁止覆盖 <code>auth_key</code></li>
+</ul>
+</div>
+
+<div class="card">
+<h3>⚡ 可靠性 / 性能</h3>
+<ul>
+  <li><span class="tag fix">并发</span><code>register_concurrency</code> 落地：asyncio.Semaphore + gather，<b>原子 try_start 防并发启动竞态</b></li>
+  <li><span class="tag fix">防御解析</span><code>_as_int</code>：配置被写坏为 <code>"true"</code>/<code>""</code> 时回退默认，不再崩溃（全链路 4 个引擎）</li>
+  <li><span class="tag fix">异常兜底</span><code>register_one</code> 抛异常也计失败入库（不再静默丢邮箱）；先落库成功再标 used</li>
+  <li><span class="tag perf">分页 COUNT</span>total 用 <code>COUNT(*)</code> 替代全表装载（accounts/emails）</li>
+  <li><span class="tag perf">连接收敛</span>全部 API 改用 <code>db_session()</code>，异常不泄漏连接</li>
+  <li><span class="tag fix">验证码窗口</span><code>otp_min_age_window_sec</code> 等可配置；graph <code>seen_codes</code> 生效、ISO 时间转 epoch 比较</li>
+</ul>
+</div>
+
+<div class="card">
+<h3>🎨 前端 / 契约</h3>
+<ul>
+  <li><span class="tag ui">搜索/分页</span>注册记录、邮箱池支持邮箱搜索（<b>300ms 防抖</b>）、状态筛选、分页</li>
+  <li><span class="tag ui">主题</span>深色/浅色一键切换（跟随系统）+ 移动端适配</li>
+  <li><span class="tag ui">日志降载</span>增量 <code>after_id</code> 拉取 + 页面隐藏暂停 + <b>全量 DESC 反转保证顺序一致</b></li>
+  <li><span class="tag ui">防重复</span>导入/手动添加弹窗按钮 loading 禁用；export-accounts 失败不再误报成功</li>
+  <li><span class="tag fix">契约</span>修复 <code>/api/logs</code> 无斜杠 404（FastAPI 0.141 惰性路由）</li>
+</ul>
+</div>
+
+<div class="card">
+<h3>📦 部署 / 代码质量 / 测试</h3>
+<ul>
+  <li><span class="tag fix">依赖</span><code>requirements.txt</code> 唯一依赖清单；脚本 playwright 缺失引导</li>
+  <li><span class="tag fix">脚本</span>refresh_all init_db 防首次报错、端口统一 23456、停止.bat 端口精确匹配</li>
+  <li><span class="tag fix">架构资产</span>Spec-Kit 治理宪法 + <code>docs/ADR/</code> ADR-001~003 + <code>workflow_status.md</code></li>
+  <li><span class="tag perf">测试</span>67 → <b>190 项</b>用例；覆盖率 48% → <b>69%</b>（核心 register_engine 85%）</li>
+</ul>
+</div>
+
+<h2>四、验收测验（请完成，检验你的理解）</h2>
+<p class="muted" style="margin-bottom:12px">点击选项作答，全部答对即通过本次变更验收。右上角实时显示得分。</p>
+
+<div id="quiz-container"></div>
+<div id="score">得分：0 / 10</div>
+
+<script>
+const quiz = [
+  {q:"`auth_enforced=true` 且 `auth_key` 仍是占位符时，服务启动会怎样？",
+   opts:["照常启动，只是不鉴权","启动即失败（fail-fast），强制先配置真实密钥","启动但仅本机可访问","打印警告后放行"], correct:1},
+  {q:"为什么引入 `_as_int` 防御式整数解析？",
+   opts:["为了性能","settings 接口把数字存成字符串，`int(\"true\")` 会崩溃导致后台任务卡死","为了支持浮点数","Python 版本兼容"], correct:1},
+  {q:"并发注册中，暂停/恢复用什么机制实现？",
+   opts:["while+sleep 轮询","asyncio.Event（clear/set），替代空转 sleep","threading.Lock","time.sleep 加大"], correct:1},
+  {q:"清空数据库（/api/register/clear）的正确方式？",
+   opts:["直接 POST 即可","需 body 带 `confirm:\"clear\"` 且清空前自动备份到 data/backups/","需管理员二次登录","无法清空"], correct:1},
+  {q:"ChatGPT 验证码现在还会明文写入日志吗？",
+   opts:["会","不会，已脱敏（只记\"成功提取验证码\"不含 code）","只在 debug 模式","只在失败时"], correct:1},
+  {q:"`push-chatgpt2api` 在未配置管理密钥时？",
+   opts:["静默用弱密钥 chatgpt2api 推送","明确报错\"未配置管理密钥\"，不再回退弱密钥","返回成功但实际失败","跳过该账号"], correct:1},
+  {q:"前端日志拉取如何做到降载？",
+   opts:["每 3 秒全量拉 1000 条","增量 after_id 只拉新增 + 页面隐藏暂停轮询","改用 WebSocket 且不重连","减少显示条数"], correct:1},
+  {q:"搜索框输入时如何避免每敲一字发一次请求？",
+   opts:["不加处理","300ms 防抖（debounce）","回车才搜索","改为 POST"], correct:1},
+  {q:"测试覆盖率从 v1 的多少提升到多少？",
+   opts:["40% → 60%","48% → 70%（本次实测 69%）","55% → 75%","30% → 50%"], correct:1},
+  {q:"两个并发「开始注册」请求为何不会重复注册同一批邮箱？",
+   opts:["数据库唯一约束","engine.try_start() 原子占位：第二个请求被 400 拒绝","前端按钮 disabled","后台任务串行"], correct:1},
+];
+let score = 0, answered = 0;
+const container = document.getElementById('quiz-container');
+quiz.forEach((item, idx) => {
+  const div = document.createElement('div');
+  div.className = 'quiz';
+  let optsHtml = item.opts.map((o, oi) =>
+    `<button class="opt" data-q="${idx}" data-o="${oi}">${String.fromCharCode(65+oi)}. ${o}</button>`).join('');
+  div.innerHTML = `<div class="q">Q${idx+1}. ${item.q}</div>${optsHtml}<div class="result"></div>`;
+  container.appendChild(div);
+});
+document.querySelectorAll('.opt').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const q = +btn.dataset.q, o = +btn.dataset.o, item = quiz[q];
+    const result = btn.parentElement.querySelector('.result');
+    const opts = btn.parentElement.querySelectorAll('.opt');
+    if (opts[0].classList.contains('correct') || opts[0].classList.contains('wrong')) return; // 已答
+    if (o === item.correct) {
+      btn.classList.add('correct'); score++; result.textContent = '✅ 正确'; result.style.color = 'var(--green)';
+    } else {
+      btn.classList.add('wrong'); opts[item.correct].classList.add('correct');
+      result.textContent = '❌ 错误，正确答案已标绿'; result.style.color = 'var(--red)';
+    }
+    answered++;
+    document.getElementById('score').textContent = `得分：${score} / ${quiz.length}${answered===quiz.length?(score===quiz.length?' 🏆 全部通过':' — 请重做未答对的题'):''}`;
+  });
+});
+</script>
+
+<p class="muted" style="margin-top:16px">本报告由终局闭环总审计生成。全部修复均经 pytest 190 项全绿 + 语法校验；剩余真实边界（真实注册需付费卡/代理、CF Solver 独立治理、chatgpt2api 实推需其在线）已在 <code>workflow_status.md</code> 如实披露。</p>
+
+</div>
+</body>
+</html>

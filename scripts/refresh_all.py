@@ -3,7 +3,7 @@
 
 解决单个账号卡死（camoufox 无响应）拖累整个批量的问题：
     - 每个账号启动独立 python 子进程（verify_account_login --email xxx）
-    - 300 秒超时自动 taskkill /T 杀树（含浏览器）
+    - 180 秒超时自动 taskkill /T 杀树（含浏览器）
     - 结果写入 data/refresh_results.jsonl，已成功的账号自动跳过
     - 进程被中断后重启本脚本即可从断点继续
 
@@ -69,6 +69,9 @@ def _load_processed() -> set[str]:
 def main():
     if not _acquire_lock():
         sys.exit(0)
+    # 确保数据库已初始化（新环境首次运行不报 "no such table: accounts"）
+    import services.db as sdb
+    sdb.init_db()
     conn = sqlite3.connect(str(ROOT / "data" / "register.db"))
     rows = conn.execute(
         "SELECT email, openai_password FROM accounts "

@@ -181,6 +181,7 @@ async def handle_client(client_reader: asyncio.StreamReader, client_writer: asyn
                         upstream_socks5: str | None, gateway: str, gateway_port: int) -> None:
     """处理客户端 CONNECT 请求，建立两级代理链"""
     peer = client_writer.get_extra_info("peername")
+    kk_writer: asyncio.StreamWriter | None = None
     try:
         # 1. 读取客户端 CONNECT 请求
         request = b""
@@ -215,7 +216,6 @@ async def handle_client(client_reader: asyncio.StreamReader, client_writer: asyn
             kk_reader, kk_writer = await asyncio.open_connection(gateway, gateway_port)
 
         # 3. 第二跳：通过 kookeey 网关 CONNECT 目标（HTTP 代理带账密）
-        kookeey_http = f"http://{KOOKEEY_USER}:{KOOKEEY_PASS}@{gateway}:{gateway_port}"
         # 直接把 kookeey 的 reader/writer 当作 HTTP 代理客户端
         kookeey_connect = (
             f"CONNECT {target_host}:{target_port} HTTP/1.1\r\n"
@@ -255,6 +255,12 @@ async def handle_client(client_reader: asyncio.StreamReader, client_writer: asyn
         except Exception:
             pass
         client_writer.close()
+        # 释放已建立的上游 kookeey 连接，避免泄漏
+        if kk_writer is not None:
+            try:
+                kk_writer.close()
+            except Exception:
+                pass
 
 
 async def main():

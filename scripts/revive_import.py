@@ -32,11 +32,20 @@ import random
 import re
 import secrets
 import string
+import sys
 import time
 from urllib.parse import urlencode
 
 import requests
-from playwright.sync_api import sync_playwright
+
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    print(
+        "未安装 playwright（本脚本为浏览器流程）。请先运行：pip install playwright && playwright install chromium",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 CARDS_FILE = os.path.join(ROOT, "本次一百个号.txt")
@@ -45,8 +54,27 @@ PW_FILE = os.path.join(ROOT, "revive_passwords.txt")
 SKIP_FILE = os.path.join(ROOT, "revive_skip.txt")
 SHOTS_DIR = os.path.join(ROOT, "revive_shots")
 
-C2API = "http://127.0.0.1:23456"
-AUTH = "Bearer chatgpt2api"
+C2API = os.environ.get("CHATGPT2API_URL") or "http://127.0.0.1:23456"
+
+
+def _load_c2api_key() -> str:
+    """chatgpt2api 管理密钥：环境变量 → config.json，不再内置弱默认凭据。"""
+    env = os.environ.get("CHATGPT2API_ADMIN_KEY") or ""
+    if env:
+        return env
+    cfg = os.path.join(os.path.dirname(ROOT), "config.json")
+    if os.path.exists(cfg):
+        try:
+            with open(cfg, encoding="utf-8") as f:
+                return str(json.load(f).get("chatgpt2api_admin_key") or "").strip()
+        except Exception:
+            pass
+    return ""
+
+
+AUTH = ("Bearer " + _load_c2api_key()).strip()
+if not AUTH.startswith("Bearer "):
+    print("[警告] 未配置 chatgpt2api 管理密钥（CHATGPT2API_ADMIN_KEY 或 config.chatgpt2api_admin_key），导入将被拒(401)", file=sys.stderr)
 PROXY = "http://127.0.0.1:10808"
 MAIL_API = "https://app.98faka.top"
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from services.db import get_pending_emails, count_emails, insert_email, get_conn
+from services.db import get_pending_emails, count_emails, insert_email, db_session
 
 router = APIRouter()
 
@@ -21,8 +21,7 @@ async def pending_emails(limit: int = 100) -> dict:
 
 @router.get("/")
 async def list_emails(status: str = "", limit: int = 0, offset: int = 0, search: str = "") -> dict:
-    """邮箱池列表，支持状态筛选 / 邮箱搜索 / 分页。"""
-    conn = get_conn()
+    """邮箱池列表，支持状态筛选 / 邮箱搜索 / 分页。total 用 COUNT 查询避免全表装载。"""
     conds: list[str] = []
     params: list = []
     if status:
@@ -32,16 +31,13 @@ async def list_emails(status: str = "", limit: int = 0, offset: int = 0, search:
         conds.append("email LIKE ?")
         params.append(f"%{search.strip()}%")
     where = (" WHERE " + " AND ".join(conds)) if conds else ""
-    rows = conn.execute(
-        f"SELECT * FROM emails{where} ORDER BY id DESC", params
-    ).fetchall()
-    total = len(rows)
-    if limit > 0:
-        rows = conn.execute(
-            f"SELECT * FROM emails{where} ORDER BY id DESC LIMIT ? OFFSET ?",
-            params + [limit, offset],
-        ).fetchall()
-    conn.close()
+    sql = f"SELECT * FROM emails{where} ORDER BY id DESC"
+    with db_session() as conn:
+        if limit > 0:
+            rows = conn.execute(sql + " LIMIT ? OFFSET ?", params + [limit, offset]).fetchall()
+        else:
+            rows = conn.execute(sql, params).fetchall()
+    total = count_emails(status=status, search=search)
     return {"emails": [dict(r) for r in rows], "total": total}
 
 
@@ -76,10 +72,8 @@ async def manual_add(req: ManualAddRequest) -> dict:
 
 @router.delete("/{email_id}")
 async def delete_email(email_id: int) -> dict:
-    conn = get_conn()
-    with conn:
+    with db_session() as conn:
         cur = conn.execute("DELETE FROM emails WHERE id = ?", (email_id,))
-    conn.close()
     if cur.rowcount == 0:
         raise HTTPException(404, "邮箱不存在")
     return {"success": True}
@@ -87,8 +81,6 @@ async def delete_email(email_id: int) -> dict:
 
 @router.post("/clear")
 async def clear_emails() -> dict:
-    conn = get_conn()
-    with conn:
+    with db_session() as conn:
         cur = conn.execute("DELETE FROM emails")
-    conn.close()
     return {"success": True, "deleted": cur.rowcount}

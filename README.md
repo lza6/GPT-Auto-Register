@@ -161,6 +161,23 @@ GPT-Auto-Register/
 
 ---
 
+## 🛡️ 生产部署安全建议
+
+1. **强制鉴权（推荐）**：`config.json` 设置真实 `auth_key` 并开启 `auth_enforced=true`。
+   未设置真实密钥时服务**拒绝启动**（fail-fast），避免"看似有鉴权实际裸奔"。
+   - 也可用环境变量注入，零改配置文件：
+     ```bash
+     set GPT_REGISTER_AUTH_KEY=你的真实密钥
+     set GPT_REGISTER_AUTH_ENFORCED=1
+     ```
+2. **清空保护**：清空库需 `confirm='clear'` 服务端确认，且清空前自动备份到 `data/backups/backup_*.json`（保留最近 7 份）。
+3. **凭据治理**：`chatgpt2api_admin_key` 从 `config.json` 或环境变量 `CHATGPT2API_ADMIN_KEY` 读取，**源码不含任何明文凭据**；
+   kookeey 代理账密从 `proxies.txt` 自动解析。
+4. **日志脱敏**：验证码不再明文写入日志；敏感配置对外掩码为 `******`（`auth_enforced` 布尔开关除外）。
+5. **外部暴露**：若服务暴露公网，务必配置 Nginx 反向代理 + HTTPS + 限制 `/api/*` 来源，并设置真实 `auth_key`。
+
+---
+
 ## 🔗 对接 chatgpt2api
 
 控制台「📤 导出账号」→「chatgpt2api 格式」会导出含 `access_token` 的 JSON，

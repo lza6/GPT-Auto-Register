@@ -43,6 +43,22 @@ class TestRegisterApi:
         resp = client.post("/api/register/start", json={"count": 0}, headers=HDR)
         assert resp.status_code == 400
 
+    async def test_start_atomic_prevents_concurrent_launch(self, client, isolated_db, monkeypatch):
+        """并发启动竞态：后台任务置位前，第二个 /start 必须被 _starting 占位拦下。"""
+        db.insert_email("a@b.com", "p", "c", "r")
+        engine = RegisterEngine({})
+        from services import register_engine as re_mod
+        monkeypatch.setattr(re_mod, "register_engine", engine)
+        # 第一个请求已占位成功
+        assert engine.try_start() is True
+        # 第二个 /start 请求被拒
+        resp = client.post("/api/register/start", json={"count": 0}, headers=HDR)
+        assert resp.status_code == 400
+        engine.abort_start()
+        # 复位后可再次启动
+        assert engine.try_start() is True
+        engine.abort_start()
+
     def test_control_all_actions(self, client):
         for action in ("pause", "resume", "stop"):
             resp = client.post("/api/register/control", json={"action": action}, headers=HDR)

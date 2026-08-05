@@ -12,6 +12,14 @@ import httpx
 from services.db import add_log
 
 
+def _iso_to_epoch(s: str) -> float:
+    """ISO8601 时间字符串(可带 Z)转 epoch 秒，解析失败返回 0。"""
+    try:
+        return datetime.fromisoformat(str(s).replace("Z", "+00:00")).timestamp()
+    except Exception:
+        return 0.0
+
+
 class GraphEmailService:
     """直接用 Microsoft Graph API 读取邮件（替代 98faka API）"""
 
@@ -168,8 +176,9 @@ class GraphEmailService:
                         mail_id = mail.get("id", "")
                         body = await self.get_email_body(email, mail_id, client_id, refresh_token)
                         code = self.extract_otp_code(body)
-                        if code:
-                            add_log("info", f"成功提取验证码: {code}", {"email": email})
+                        if code and code not in seen_codes:
+                            seen_codes.add(code)
+                            add_log("info", "成功提取验证码", {"email": email})
                             return code
             except Exception as e:
                 add_log("warning", f"轮询验证码异常: {e}", {"email": email})
@@ -191,8 +200,8 @@ class GraphEmailService:
                 emails = await self.get_email_list(email, client_id, refresh_token, top=8)
                 for mail in emails:
                     received = str(mail.get("received_time") or "")
-                    # 只接受晚于 after_time 的新邮件
-                    if received and received <= after_time:
+                    # 只接受晚于 after_time 的新邮件（统一转 epoch 比较，避免字符串序误判）
+                    if received and _iso_to_epoch(received) <= _iso_to_epoch(after_time):
                         continue
                     subject = str(mail.get("subject") or "").lower()
                     from_addr = str(mail.get("from_address") or "").lower()

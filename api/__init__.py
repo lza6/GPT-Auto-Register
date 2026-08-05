@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -31,14 +32,17 @@ def load_config() -> dict:
 
 
 def _resolve_auth_key() -> str:
-    """读取 auth_key，占位符视为未配置（返回空串 = 不强制鉴权）。"""
-    key = str(load_config().get("auth_key") or "").strip()
+    """读取 auth_key：优先环境变量 GPT_REGISTER_AUTH_KEY，其次 config.json。
+    占位符视为未配置（返回空串 = 不强制鉴权）。环境变量便于生产注入，无需改配置文件。"""
+    key = os.environ.get("GPT_REGISTER_AUTH_KEY") or str(load_config().get("auth_key") or "").strip()
     return "" if key in DEFAULT_AUTH_PLACEHOLDERS else key
 
 
 def _resolve_auth_enforced() -> bool:
-    """读取 auth_enforced（布尔或字符串 'true'/'false'，兼容 settings API 存字符串）。"""
-    v = load_config().get("auth_enforced", False)
+    """读取 auth_enforced：优先环境变量 GPT_REGISTER_AUTH_ENFORCED，其次 config。
+    兼容布尔或字符串 'true'/'false'（settings API 存字符串）。"""
+    env = os.environ.get("GPT_REGISTER_AUTH_ENFORCED")
+    v = env if env is not None else load_config().get("auth_enforced", False)
     if isinstance(v, bool):
         return v
     if isinstance(v, str):

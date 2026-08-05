@@ -43,6 +43,32 @@ def _create_task(total: int) -> int:
     return cur.lastrowid
 
 
+class TestConfigParsing:
+    """数字配置被 settings API 写坏为字符串/非法值时不得崩溃（防御式 _as_int）。"""
+
+    def test_as_int_parses_strings_and_falls_back(self):
+        from services.register_engine import _as_int
+
+        assert _as_int("3", 1) == 3
+        assert _as_int("true", 1) == 1   # 非法字符串回退默认
+        assert _as_int("", 1) == 1
+        assert _as_int(None, 1) == 1
+        assert _as_int(5, 1) == 5
+        assert _as_int("12 ", 1) == 12   # 容忍首尾空格
+
+    async def test_bad_concurrency_string_does_not_crash(self, isolated_db, monkeypatch):
+        # 真实风险：前端把 register_concurrency 存成 'true'（曾发生），run_batch 不得 int('true') 崩溃
+        eng = RegisterEngine({"register_concurrency": "true", "register_interval_sec": 0})
+
+        async def fake(email, password, client_id, refresh_token):
+            return _ok(email)
+
+        monkeypatch.setattr(eng, "register_one", fake)
+        monkeypatch.setattr(eng, "_append_token", lambda t: None)
+        stats = await eng.run_batch(_emails(2), task_id=1)
+        assert stats["completed"] == 2
+
+
 class TestRunBatchConcurrency:
     async def test_concurrency_capped_by_config(self, isolated_db, monkeypatch):
         eng = RegisterEngine({"register_interval_sec": 0, "register_concurrency": 3})
@@ -198,3 +224,24 @@ class TestFailureTypes:
         stats = await eng.run_batch(_emails(1), task_id=task_id)
         assert stats["failed"] == 1
         assert stats["failure_types"].get("unknown") == 1
+
+    async def test_register_one_raises_counts_failure_and_persists(self, isolated_db, monkeypatch):
+        """register_one 抛异常（非 dict 返回）也应计失败并落库，避免邮箱静默丢失。"""
+        eng = RegisterEngine({"register_interval_sec": 0})
+        task_id = _create_task(total=1)
+
+        async def boom(email, password, client_id, refresh_token):
+            raise RuntimeError("network exploded")
+
+        monkeypatch.setattr(eng, "register_one", boom)
+        monkeypatch.setattr(eng, "_append_token", lambda t: None)
+
+        stats = await eng.run_batch(_emails(1), task_id=task_id)
+        assert stats["failed"] == 1
+        assert stats["failure_types"].get("unknown") == 1
+        conn = db.get_conn()
+        row = conn.execute("SELECT status, error FROM accounts WHERE email='u0@y.com'").fetchone()
+        conn.close()
+        assert row is not None
+        assert row["status"] == "failed"
+        assert "注册异常" in row["error"]

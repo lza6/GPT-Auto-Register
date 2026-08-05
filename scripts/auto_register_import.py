@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sqlite3
 import sys
 import time
@@ -26,8 +27,25 @@ from services.db import get_conn, init_db, insert_email, get_pending_emails, add
 from services.email_service import email_service
 from services.register_engine import get_engine
 
-CHATGPT2API_URL = "http://localhost:23456"
-CHATGPT2API_KEY = "chatgpt2api"
+ROOT_DIR = Path(__file__).resolve().parent.parent
+
+
+def _load_c2api_key() -> str:
+    """chatgpt2api 管理密钥：环境变量 → config.json，不再内置弱默认凭据。"""
+    env = os.environ.get("CHATGPT2API_ADMIN_KEY") or ""
+    if env:
+        return env
+    cfg = ROOT_DIR / "config.json"
+    if cfg.exists():
+        try:
+            return str(json.loads(cfg.read_text(encoding="utf-8")).get("chatgpt2api_admin_key") or "").strip()
+        except Exception:
+            pass
+    return ""
+
+
+CHATGPT2API_URL = os.environ.get("CHATGPT2API_URL") or "http://127.0.0.1:23456"
+CHATGPT2API_KEY = _load_c2api_key()
 
 
 def import_emails_from_source(source_url: str) -> dict:
@@ -86,6 +104,7 @@ def import_to_chatgpt2api(tokens: list[str]) -> dict:
 
 
 def main():
+    global CHATGPT2API_URL, CHATGPT2API_KEY
     parser = argparse.ArgumentParser(description="完整闭环：注册+标准JWT+自动去重导入chatgpt2api")
     parser.add_argument("--source", required=True, help="91kami 邮箱源链接")
     parser.add_argument("--proxy", default="http://127.0.0.1:10808", help="本地代理")
@@ -94,9 +113,10 @@ def main():
     parser.add_argument("--chatgpt2api-key", default=CHATGPT2API_KEY, help="chatgpt2api API key")
     args = parser.parse_args()
 
-    global CHATGPT2API_URL, CHATGPT2API_KEY
     CHATGPT2API_URL = args.chatgpt2api_url
     CHATGPT2API_KEY = args.chatgpt2api_key
+    if not CHATGPT2API_KEY:
+        print("[警告] 未配置 chatgpt2api 管理密钥（CHATGPT2API_ADMIN_KEY 或 config.chatgpt2api_admin_key），导入可能被拒(401)")
 
     print("=" * 60)
     print("完整闭环：注册 → 标准JWT → 导入chatgpt2api")

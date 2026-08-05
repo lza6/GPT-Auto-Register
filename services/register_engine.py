@@ -11,9 +11,21 @@ def _as_bool(value, default: bool = True) -> bool:
     """解析配置布尔值。settings API 把开关存为字符串（'true'/'false'），需兼容。"""
     if isinstance(value, bool):
         return value
+    if isinstance(value, (int, float)):
+        return bool(value)  # 0/1 数值开关
     if isinstance(value, str):
         return value.strip().lower() in ("1", "true", "yes", "on")
     return default
+
+
+def _as_int(value, default: int) -> int:
+    """解析配置整数。settings API 存字符串，非法/空值回退默认（防 int('true') 崩溃）。"""
+    if value is None or value == "":
+        return default
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
 
 
 class RegisterEngine:
@@ -25,11 +37,13 @@ class RegisterEngine:
             "user_agent",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
         )
-        self.otp_timeout = int(config.get("otp_wait_timeout_sec", 120))
-        self.otp_poll = int(config.get("otp_poll_interval_sec", 5))
+        self.otp_timeout = _as_int(config.get("otp_wait_timeout_sec"), 120)
+        self.otp_poll = _as_int(config.get("otp_poll_interval_sec"), 5)
         self.token_file = config.get("token_output_file", "已经获取到的token.txt")
         self._running = False
         self._paused = False
+        self._starting = False  # 防并发 /start 竞态：后台任务置位前先占位
+        self._stop_requested = False  # stop 独立标志，不被 run_batch 开头覆盖
         # 暂停/恢复用 asyncio.Event（避免 while+sleep 空转），stop 时 set 唤醒等待槽位
         self._pause_event = asyncio.Event()
         self._pause_event.set()
@@ -41,6 +55,20 @@ class RegisterEngine:
     @property
     def is_paused(self) -> bool:
         return self._paused
+
+    def try_start(self) -> bool:
+        """原子尝试占位启动，防并发 /register/start 竞态（check-then-set）。
+
+        后台任务（run_batch）尚未把 _running 置位时，_starting 挡住第二个启动请求。
+        """
+        if self._running or self._starting:
+            return False
+        self._starting = True
+        return True
+
+    def abort_start(self) -> None:
+        """启动占位后因无待处理邮箱等提前中止时复位标记。"""
+        self._starting = False
 
     def pause(self) -> None:
         self._paused = True
@@ -55,6 +83,7 @@ class RegisterEngine:
     def stop(self) -> None:
         self._running = False
         self._paused = False
+        self._stop_requested = True  # 独立停止标志，避免被 run_batch 开头的 _running=True 覆盖
         self._pause_event.set()  # 唤醒等待中的槽位，让它们检查 running 后退出
         add_log("info", "注册任务已停止")
 
@@ -112,9 +141,22 @@ class RegisterEngine:
         """
         self._running = True
         self._paused = False
+        self._starting = False
+        was_stopped = self._stop_requested
+        self._stop_requested = False
+        if was_stopped:
+            # 在 try_start 占位到 run_batch 真正开始之间收到了 stop：不覆盖停止请求，直接结束
+            self._running = False
+            stats = {"total": len(emails), "completed": 0, "failed": 0, "skipped": 0, "failure_types": {}}
+            update_task_progress(
+                task_id, 0, 0, 0, status="stopped",
+                result=json.dumps(stats, ensure_ascii=False),
+            )
+            add_log("info", "批量注册在启动前已被停止")
+            return stats
         self._pause_event = asyncio.Event()
         self._pause_event.set()
-        concurrency = max(1, int(self.config.get("register_concurrency") or 1))
+        concurrency = max(1, _as_int(self.config.get("register_concurrency"), 1))
         stats: dict[str, Any] = {
             "total": len(emails), "completed": 0, "failed": 0, "skipped": 0,
             "failure_types": {},
@@ -144,19 +186,31 @@ class RegisterEngine:
                         update_task_progress(task_id, stats["completed"], stats["failed"], stats["skipped"])
                     return
 
-                result = await self.register_one(
-                    email=email,
-                    password=mail["password"],
-                    client_id=mail["client_id"],
-                    refresh_token=mail["refresh_token"],
-                )
+                try:
+                    result = await self.register_one(
+                        email=email,
+                        password=mail["password"],
+                        client_id=mail["client_id"],
+                        refresh_token=mail["refresh_token"],
+                    )
+                except Exception as exc:
+                    # register_one 抛异常（非 dict 返回）也计入失败并落库，避免邮箱静默丢失
+                    add_log("error", f"[{email}] 注册异常: {exc}")
+                    async with stats_lock:
+                        stats["failed"] += 1
+                        stats["failure_types"]["unknown"] = stats["failure_types"].get("unknown", 0) + 1
+                        insert_account(
+                            email=email, password=mail["password"],
+                            client_id=mail["client_id"], refresh_token=mail["refresh_token"],
+                            proxy=self.config.get("proxy_url") or "直连",
+                            status="failed", error=f"注册异常: {exc}",
+                        )
+                        update_task_progress(task_id, stats["completed"], stats["failed"], stats["skipped"])
+                    return
 
                 async with stats_lock:
                     if result["status"] == "success":
-                        stats["completed"] += 1
-                        mark_email_status(email, "used")
-                        if result["access_token"]:
-                            self._append_token(result["access_token"])
+                        # 先落库成功再标 used：insert 抛错则邮箱保持 pending，下轮可重试
                         insert_account(
                             email=email, password=mail["password"],
                             client_id=mail["client_id"], refresh_token=mail["refresh_token"],
@@ -166,6 +220,10 @@ class RegisterEngine:
                             name=result["name"], birthdate=result["birthdate"],
                             proxy=result["proxy"], status="success",
                         )
+                        stats["completed"] += 1
+                        mark_email_status(email, "used")
+                        if result["access_token"]:
+                            self._append_token(result["access_token"])
                     elif result["status"] == "cf_blocked":
                         stats["skipped"] += 1
                         insert_account(
@@ -177,8 +235,6 @@ class RegisterEngine:
                             error="遇到 Cloudflare 人机验证",
                         )
                     elif result["status"] == "success_no_token":
-                        stats["completed"] += 1
-                        mark_email_status(email, "used")
                         insert_account(
                             email=email, password=mail["password"],
                             client_id=mail["client_id"], refresh_token=mail["refresh_token"],
@@ -188,6 +244,8 @@ class RegisterEngine:
                             proxy=result["proxy"], status="success_no_token",
                             error="注册成功但未获取到 token",
                         )
+                        stats["completed"] += 1
+                        mark_email_status(email, "used")
                     else:
                         stats["failed"] += 1
                         ftype = result.get("failure_type") or "unknown"
@@ -202,7 +260,7 @@ class RegisterEngine:
                         )
                     update_task_progress(task_id, stats["completed"], stats["failed"], stats["skipped"])
 
-            interval = int(self.config.get("register_interval_sec", 10))
+            interval = _as_int(self.config.get("register_interval_sec"), 10)
             if interval > 0 and self._running:
                 await asyncio.sleep(interval)
 

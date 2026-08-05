@@ -216,21 +216,33 @@ def get_accounts(status: str = "", limit: int = 0, offset: int = 0, search: str 
     return [dict(r) for r in rows]
 
 
-def count_accounts(status: str = "") -> int:
+def count_accounts(status: str = "", search: str = "") -> int:
     with db_session() as conn:
+        conds: list[str] = []
+        params: list = []
         if status:
-            row = conn.execute("SELECT COUNT(*) as c FROM accounts WHERE status = ?", (status,)).fetchone()
-        else:
-            row = conn.execute("SELECT COUNT(*) as c FROM accounts").fetchone()
+            conds.append("status = ?")
+            params.append(status)
+        if search:
+            conds.append("email LIKE ?")
+            params.append(f"%{search.strip()}%")
+        where = (" WHERE " + " AND ".join(conds)) if conds else ""
+        row = conn.execute(f"SELECT COUNT(*) as c FROM accounts{where}", params).fetchone()
     return row["c"] if row else 0
 
 
-def count_emails(status: str = "") -> int:
+def count_emails(status: str = "", search: str = "") -> int:
     with db_session() as conn:
+        conds: list[str] = []
+        params: list = []
         if status:
-            row = conn.execute("SELECT COUNT(*) as c FROM emails WHERE status = ?", (status,)).fetchone()
-        else:
-            row = conn.execute("SELECT COUNT(*) as c FROM emails").fetchone()
+            conds.append("status = ?")
+            params.append(status)
+        if search:
+            conds.append("email LIKE ?")
+            params.append(f"%{search.strip()}%")
+        where = (" WHERE " + " AND ".join(conds)) if conds else ""
+        row = conn.execute(f"SELECT COUNT(*) as c FROM emails{where}", params).fetchone()
     return row["c"] if row else 0
 
 

@@ -21,7 +21,7 @@ class ImapEmailService:
             try:
                 code = await self._fetch_latest_otp(email, password, seen_ids)
                 if code:
-                    add_log("info", f"IMAP 成功提取验证码: {code}", {"email": email})
+                    add_log("info", "IMAP 成功提取验证码", {"email": email})
                     return code
             except Exception as e:
                 add_log("warning", f"IMAP 轮询异常: {e}", {"email": email})

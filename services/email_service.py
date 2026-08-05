@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -8,6 +9,16 @@ from typing import Any
 import httpx
 
 from services.db import add_log, insert_email, mark_email_status
+
+
+def _as_int(value, default: int) -> int:
+    """防御式整数解析：settings API 存字符串，非法/空回退默认。"""
+    if value is None or value == "":
+        return default
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
 
 
 class EmailService:
@@ -196,7 +207,7 @@ class EmailService:
 
         # 时间过滤：只读取最近 min_age_window_sec 秒内收到的邮件（原硬编码 120）
         from datetime import datetime
-        min_time = start_time - max(1, int(min_age_window_sec))
+        min_time = start_time - max(1, _as_int(min_age_window_sec, 120))
         while time.time() - start_time < timeout_sec:
             try:
                 emails = await self.get_email_list(email, password, client_id, refresh_token)
@@ -228,7 +239,7 @@ class EmailService:
                         body = await self.get_email_body(email, mail_id, client_id, refresh_token)
                         code = self.extract_otp_code(body)
                         if code:
-                            add_log("info", f"成功提取验证码: {code}", {"email": email})
+                            add_log("info", "成功提取验证码", {"email": email})
                             return code
             except Exception as e:
                 add_log("warning", f"轮询验证码异常: {e}", {"email": email})
@@ -236,7 +247,5 @@ class EmailService:
         add_log("error", f"验证码等待超时 ({timeout_sec}s)", {"email": email})
         return None
 
-
-import asyncio
 
 email_service = EmailService()

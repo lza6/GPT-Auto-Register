@@ -95,6 +95,7 @@ class TestPushChatgpt2api:
                           status="success", openai_refresh_token="rt", access_token="eyJx")
         import api.register as reg_mod
 
+        monkeypatch.setattr(reg_mod, "_get_chatgpt2api_admin_key", lambda: "real-key")
         monkeypatch.setattr(
             reg_mod, "_refresh_oauth",
             lambda ort: {"access_token": "eyJ" + "x" * 200, "refresh_token": ort, "id_token": ""},
@@ -109,7 +110,20 @@ class TestPushChatgpt2api:
         assert resp.json()["success"] is False
         assert resp.json()["pushed"] == 0
 
-    async def test_push_no_accounts_returns_error(self, client, isolated_db):
+    async def test_push_missing_key_returns_error(self, client, isolated_db, monkeypatch):
+        import api.register as reg_mod
+
+        # 明确 mock 读不到密钥（config 未配置 chatgpt2api_admin_key），推送应报错而非静默用弱密钥
+        monkeypatch.setattr(reg_mod, "_get_chatgpt2api_admin_key", lambda: "")
+        resp = client.post("/api/register/push-chatgpt2api", json={}, headers=HDR)
+        assert resp.status_code == 200
+        assert resp.json()["success"] is False
+        assert "密钥" in resp.json()["error"]
+
+    async def test_push_no_accounts_returns_error(self, client, isolated_db, monkeypatch):
+        import api.register as reg_mod
+
+        monkeypatch.setattr(reg_mod, "_get_chatgpt2api_admin_key", lambda: "real-key")
         resp = client.post("/api/register/push-chatgpt2api", json={}, headers=HDR)
         assert resp.status_code == 200
         assert resp.json()["success"] is False

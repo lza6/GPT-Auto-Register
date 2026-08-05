@@ -172,6 +172,9 @@ class TestWaitForOtp:
         monkeypatch.setattr(svc, "get_email_body", fake_body)
         code = await svc.wait_for_otp("e@f.com", "p", "c", "rt", timeout_sec=1, poll_interval=0)
         assert code == "123456"
+        # 安全：验证码不应明文写入日志（logs 可经 /api/logs 查看，脱敏）
+        logs = db.get_logs(limit=50)
+        assert all("123456" not in (l.get("message") or "") for l in logs)
 
     async def test_timeout_returns_none(self, monkeypatch, isolated_db):
         svc = EmailService()

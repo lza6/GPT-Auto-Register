@@ -159,7 +159,7 @@ input:focus,textarea:focus{border-color:var(--accent)}
         <button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="loadAccounts()">共 <span id="accCount">0</span> 条</button>
       </h2>
       <div class="controls" style="margin-bottom:12px">
-        <input type="text" id="accSearch" placeholder="🔍 搜索邮箱..." style="max-width:240px" oninput="accPage=0;loadAccounts()">
+        <input type="text" id="accSearch" placeholder="🔍 搜索邮箱..." style="max-width:240px" oninput="onAccSearch()">
         <select id="accStatus" style="max-width:160px" onchange="accPage=0;loadAccounts()">
           <option value="">全部状态</option>
           <option value="success">成功</option>
@@ -191,7 +191,7 @@ input:focus,textarea:focus{border-color:var(--accent)}
       </h2>
       <div class="hint">邮箱池是微软邮箱账号，用于接收注册验证码。格式：<code>邮箱----密码----client_id----refresh_token</code>（每行一个，可从 91kami 导出或手动粘贴）。</div>
       <div class="controls" style="margin-bottom:12px">
-        <input type="text" id="emSearch" placeholder="🔍 搜索邮箱..." style="max-width:240px" oninput="emPage=0;loadEmails()">
+        <input type="text" id="emSearch" placeholder="🔍 搜索邮箱..." style="max-width:240px" oninput="onEmSearch()">
         <select id="emStatus" style="max-width:160px" onchange="emPage=0;loadEmails()">
           <option value="">全部状态</option>
           <option value="pending">待注册</option>
@@ -301,8 +301,14 @@ let accPage = 0;
 let emPage = 0;
 let lastLogId = 0;
 let taskRunning = false;
+let accSearchTimer = null;
+let emSearchTimer = null;
 const ACC_PAGE_SIZE = 50;
 const EM_PAGE_SIZE = 50;
+
+// 搜索防抖：避免每敲一个字符就发一次请求
+function onAccSearch() { accPage = 0; clearTimeout(accSearchTimer); accSearchTimer = setTimeout(() => loadAccounts(), 300); }
+function onEmSearch() { emPage = 0; clearTimeout(emSearchTimer); emSearchTimer = setTimeout(() => loadEmails(), 300); }
 
 function escapeHtml(s) {
   if (s === null || s === undefined) return '';
@@ -431,20 +437,25 @@ function openImport() {
       <input type="url" id="impUrl" placeholder="https://mai.91kami.com/cpd/..." value="${escapeHtml(src)}"></div>
     <div class="modal-actions">
       <button class="btn btn-ghost" onclick="closeModal()">取消</button>
-      <button class="btn btn-success" onclick="importEmails()">开始导入</button>
+      <button class="btn btn-success" id="btnImportModal" onclick="importEmails()">开始导入</button>
     </div>`);
 }
 async function importEmails() {
   const url = document.getElementById('impUrl').value.trim();
-  const btn = document.getElementById('btnImport');
-  btn.disabled = true; btn.textContent = '导入中...';
+  const btnModal = document.getElementById('btnImportModal');
+  const btnHead = document.getElementById('btnImport');
+  if (btnModal) btnModal.disabled = true;
+  btnHead.disabled = true; btnHead.textContent = '导入中...';
   try {
     const data = await api('/register/import-emails', { method: 'POST', body: JSON.stringify({ source_url: url }) });
     closeModal();
     toast(`导入完成: 新增 ${data.data.inserted}, 跳过 ${data.data.skipped}`);
     refreshStatus();
   } catch (e) { alert('导入失败: ' + e.message); }
-  btn.disabled = false; btn.textContent = '📥 导入邮箱';
+  finally {
+    if (btnModal) btnModal.disabled = false;
+    btnHead.disabled = false; btnHead.textContent = '📥 导入邮箱';
+  }
 }
 
 // ── 手动添加邮箱 ──
@@ -455,18 +466,21 @@ function openManualAdd() {
       <textarea id="manualEmails" style="min-height:220px" placeholder="xxx@outlook.com----密码----client_id----refresh_token"></textarea></div>
     <div class="modal-actions">
       <button class="btn btn-ghost" onclick="closeModal()">取消</button>
-      <button class="btn btn-success" onclick="submitManualAdd()">添加</button>
+      <button class="btn btn-success" id="btnManualAddModal" onclick="submitManualAdd()">添加</button>
     </div>`);
 }
 async function submitManualAdd() {
   const text = document.getElementById('manualEmails').value;
   if (!text.trim()) { alert('内容为空'); return; }
+  const btn = document.getElementById('btnManualAddModal');
+  if (btn) btn.disabled = true;
   try {
     const data = await api('/emails/manual-add', { method: 'POST', body: JSON.stringify({ text }) });
     closeModal();
     toast(`已添加 ${data.inserted} 个邮箱, 跳过 ${data.skipped} 个`);
     refreshStatus(); loadEmails();
   } catch (e) { alert('添加失败: ' + e.message); }
+  finally { if (btn) btn.disabled = false; }
 }
 
 // ── 注册控制 ──
@@ -644,7 +658,7 @@ function openProxyEditor() {
         <button class="btn btn-ghost" onclick="closeModal()">取消</button>
         <button class="btn btn-success" onclick="saveProxies()">保存</button>
       </div>`);
-  });
+  }).catch(e => alert('加载代理池失败: ' + e.message));
 }
 async function saveProxies() {
   const content = document.getElementById('proxyContent').value;
@@ -677,11 +691,13 @@ async function loadLogs(force) {
       return;
     }
     if (!lastLogId) box.innerHTML = '';  // 首次/重置：清空后全量渲染
-    box.insertAdjacentHTML('beforeend', data.logs.map(l => {
+    const parts = data.logs.map(l => {
       const time = new Date(l.created_at * 1000).toLocaleTimeString();
       const cls = l.level === 'error' ? 'log-error' : l.level === 'warning' ? 'log-warning' : 'log-info';
       return `<div class="${cls}"><span class="log-time">[${time}]</span> ${escapeHtml(l.message)}</div>`;
-    }).join(''));
+    });
+    // 首次全量走 /logs（DESC 最新在前）需 reverse 让最新在底部；增量 after_id 已是 ASC 直接追加
+    box.insertAdjacentHTML('beforeend', (lastLogId ? parts : parts.reverse()).join(''));
     data.logs.forEach(l => { if (l.id > lastLogId) lastLogId = l.id; });
     box.scrollTop = box.scrollHeight;
   } catch (e) { console.error(e); }
@@ -774,6 +790,11 @@ async function loadC2apiExport() {
   document.getElementById('exportStats').textContent = '正在生成 chatgpt2api 格式...';
   try {
     const data = await api('/register/export-accounts', { method: 'POST', body: '{}' });
+    if (data.success === false) {
+      // 后端错误时 HTTP 仍 200（约定 success=false），必须检查，避免误报成功/导出空文件
+      document.getElementById('exportStats').textContent = '导出失败: ' + (data.error || '未知错误');
+      return;
+    }
     exportTextCache = JSON.stringify(data.accounts, null, 2);
     document.getElementById('exportText').value = exportTextCache;
     document.getElementById('exportStats').textContent = `✅ chatgpt2api 格式 ${data.accounts.length} 个账号`;
@@ -808,7 +829,7 @@ function openAdvanced() {
         <tbody>${rows || '<tr><td colspan="2" class="muted">空配置</td></tr>'}</tbody>
       </table></div>
       <div class="modal-actions"><button class="btn btn-ghost" onclick="closeModal()">关闭</button></div>`);
-  });
+  }).catch(e => alert('加载高级设置失败: ' + e.message));
 }
 
 // ── 通用 ──

@@ -54,6 +54,16 @@ def gen_password(length: int = 16) -> str:
     return "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(length))
 
 
+def _as_int(value, default: int) -> int:
+    """防御式整数解析：settings API 存字符串，非法/空回退默认。"""
+    if value is None or value == "":
+        return default
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
 def _gen_pkce() -> tuple[str, str]:
     verifier = base64.urlsafe_b64encode(secrets.token_bytes(64)).rstrip(b"=").decode("ascii")
     challenge = base64.urlsafe_b64encode(
@@ -96,11 +106,11 @@ class ProtocolRegister:
     def __init__(self, config: dict[str, Any]) -> None:
         self.config = config
         self.ua = config.get("user_agent", USER_AGENT)
-        self.otp_timeout = int(config.get("otp_wait_timeout_sec", 600))
-        self.otp_poll = int(config.get("otp_poll_interval_sec", 5))
-        self.otp_min_age_window_sec = int(config.get("otp_min_age_window_sec", 8))
-        self.otp_fallback_after_sec = int(config.get("otp_fallback_after_sec", 40))
-        self.otp_backfill_window_min = int(config.get("otp_backfill_window_min", 15))
+        self.otp_timeout = _as_int(config.get("otp_wait_timeout_sec"), 600)
+        self.otp_poll = _as_int(config.get("otp_poll_interval_sec"), 5)
+        self.otp_min_age_window_sec = _as_int(config.get("otp_min_age_window_sec"), 8)
+        self.otp_fallback_after_sec = _as_int(config.get("otp_fallback_after_sec"), 40)
+        self.otp_backfill_window_min = _as_int(config.get("otp_backfill_window_min"), 15)
         self.proxy_url = config.get("proxy_url") or ""
         self.mail_api = (config.get("email_api_base") or MAIL_API).rstrip("/")
 
@@ -194,9 +204,11 @@ class ProtocolRegister:
         }
         deadline = time.time() + self.otp_timeout
         t0 = time.time()
+        consecutive_failures = 0
         while time.time() < deadline:
             try:
                 mails = self._mail_api("/api/emails", payload).get("data") or []
+                consecutive_failures = 0
                 window = dt.timedelta(seconds=self.otp_min_age_window_sec)
                 cands = [m for m in mails if self._is_otp_mail(m)
                          and self._mail_time(m) >= after - window]
@@ -214,8 +226,13 @@ class ProtocolRegister:
                         code = self._code_from(card, newest)
                         if code:
                             return code
-            except Exception:
-                pass
+            except Exception as e:
+                consecutive_failures += 1
+                # 邮件 API 连续失败：指数退避，仅对持续故障提前结束（瞬时抖动/429 不误判为超时）
+                if consecutive_failures >= 6:
+                    return None
+                time.sleep(min(self.otp_poll * (2 ** min(consecutive_failures - 1, 3)), 20))
+                continue
             time.sleep(self.otp_poll)
         return None
 
@@ -320,9 +337,14 @@ class ProtocolRegister:
                     result["error"], result["fallback_browser"], result["failure_type"] = \
                         self._classify_failure(r2, j2, "user/register")
                     return result
-                session.get(f"{AUTH_BASE}/api/accounts/email-otp/send",
-                            allow_redirects=False,
-                            headers=self._base_headers(f"{AUTH_BASE}/create-account/password", device_id))
+                r_send = session.get(f"{AUTH_BASE}/api/accounts/email-otp/send",
+                                     allow_redirects=False,
+                                     headers=self._base_headers(f"{AUTH_BASE}/create-account/password", device_id))
+                if r_send.status_code != 200:
+                    result["error"] = f"email-otp/send HTTP {r_send.status_code}"
+                    result["fallback_browser"] = True
+                    result["failure_type"] = "server_5xx" if r_send.status_code >= 500 else "network"
+                    return result
 
             # ── 2b. log-in：passwordless 触发 OTP（半成品/已存在账号） ──
             else:

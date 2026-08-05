@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from services.db import get_logs, get_logs_after, get_conn
+from services.db import get_logs, get_logs_after, db_session
 
 router = APIRouter()
 
@@ -19,8 +19,6 @@ async def list_logs(limit: int = 1000, offset: int = 0, after_id: int = 0) -> di
 
 @router.post("/clear")
 async def clear_logs() -> dict:
-    conn = get_conn()
-    with conn:
+    with db_session() as conn:
         cur = conn.execute("DELETE FROM logs")
-    conn.close()
     return {"success": True, "deleted": cur.rowcount}

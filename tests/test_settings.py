@@ -18,6 +18,19 @@ class TestSettingsWhitelist:
         resp = client.post("/api/settings/", json={"key": "auth_key", "value": "hacked"}, headers=HDR)
         assert resp.status_code == 400
 
+    def test_mask_sensitive_keeps_auth_enforced(self):
+        # 布尔开关 auth_enforced 不掩码（否则前端读不回）；密钥类掩码
+        from api.settings import _mask_sensitive
+
+        out = _mask_sensitive({
+            "auth_key": "secret", "chatgpt2api_admin_key": "k",
+            "auth_enforced": True, "protocol_first": "true",
+        })
+        assert out["auth_key"] == "******"
+        assert out["chatgpt2api_admin_key"] == "******"
+        assert out["auth_enforced"] is True
+        assert out["protocol_first"] == "true"
+
     def test_allow_whitelisted_key(self, client, isolated_db):
         resp = client.post(
             "/api/settings/",

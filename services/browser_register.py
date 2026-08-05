@@ -16,7 +16,6 @@ import httpx
 from services.db import add_log
 from services.email_service import email_service
 from services.graph_email_service import graph_email_service
-from services.imap_email_service import imap_email_service
 from services.name_service import name_service
 from services.proxy_service import proxy_service
 from services.browser_selectors import (
@@ -53,13 +52,23 @@ def gen_password(length: int = 16) -> str:
     return "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(length))
 
 
+def _as_int(value, default: int) -> int:
+    """防御式整数解析：settings API 存字符串，非法/空回退默认。"""
+    if value is None or value == "":
+        return default
+    try:
+        return int(str(value).strip())
+    except (TypeError, ValueError):
+        return default
+
+
 class BrowserRegister:
     """使用 camoufox 浏览器完成 ChatGPT 注册（执行 JS，触发验证码发送）"""
 
     def __init__(self, config: dict[str, Any]) -> None:
         self.config = config
-        self.otp_timeout = int(config.get("otp_wait_timeout_sec", 120))
-        self.otp_poll = int(config.get("otp_poll_interval_sec", 5))
+        self.otp_timeout = _as_int(config.get("otp_wait_timeout_sec"), 120)
+        self.otp_poll = _as_int(config.get("otp_poll_interval_sec"), 5)
 
     async def _wait_for_new_otp(self, email: str, password: str, client_id: str,
                                  refresh_token: str, old_mail_ids: set[str],
@@ -73,7 +82,7 @@ class BrowserRegister:
                 timeout_sec=timeout_sec,
                 poll_interval=poll_interval,
                 skip_existing=False,
-                min_age_window_sec=int(self.config.get("otp_min_age_window_sec", 120)),
+                min_age_window_sec=_as_int(self.config.get("otp_min_age_window_sec"), 120),
             )
             if code:
                 return code

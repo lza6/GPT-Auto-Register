@@ -21,7 +21,7 @@ from pathlib import Path
 import httpx
 
 ROOT = Path(__file__).resolve().parent.parent
-API_BASE = os.environ.get("CHATGPT2API_URL", "http://127.0.0.1:23499")
+API_BASE = os.environ.get("CHATGPT2API_URL", "http://127.0.0.1:23456")
 
 
 def load_admin_key() -> str:

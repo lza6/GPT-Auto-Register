@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 from services.db import (
     add_log, get_pending_emails, get_accounts, get_stats,
-    get_setting, set_setting, get_conn, get_latest_task,
+    get_conn, get_latest_task, db_session, count_accounts,
 )
 from services.register_engine import get_engine
 from services.email_service import email_service
@@ -57,32 +57,38 @@ async def import_emails(req: ImportEmailsRequest) -> dict:
 async def start_register(req: StartRegisterRequest, background_tasks: BackgroundTasks) -> dict:
     config = _load_config()
     engine = get_engine(config)
-    if engine.is_running:
+    # 原子占位启动，防两个并发 /start 都通过检查、导致同一批邮箱重复注册
+    if not engine.try_start():
         raise HTTPException(400, "注册任务已在运行中")
 
-    pending = get_pending_emails(limit=req.count)
-    if not pending:
-        raise HTTPException(400, "没有待注册的邮箱")
+    try:
+        pending = get_pending_emails(limit=req.count)
+        if not pending:
+            engine.abort_start()
+            raise HTTPException(400, "没有待注册的邮箱")
 
-    emails = [
-        {
-            "email": e["email"],
-            "password": e["password"],
-            "client_id": e["client_id"],
-            "refresh_token": e["refresh_token"],
-        }
-        for e in pending
-    ]
+        emails = [
+            {
+                "email": e["email"],
+                "password": e["password"],
+                "client_id": e["client_id"],
+                "refresh_token": e["refresh_token"],
+            }
+            for e in pending
+        ]
 
-    # 创建任务记录
-    conn = get_conn()
-    with conn:
-        cursor = conn.execute(
-            "INSERT INTO tasks (task_type, status, total) VALUES (?, ?, ?)",
-            ("batch_register", "running", len(emails)),
-        )
-        task_id = cursor.lastrowid
-    conn.close()
+        # 创建任务记录（db_session 自动提交/回滚/关闭，异常不泄漏连接）
+        with db_session() as conn:
+            cursor = conn.execute(
+                "INSERT INTO tasks (task_type, status, total) VALUES (?, ?, ?)",
+                ("batch_register", "running", len(emails)),
+            )
+            task_id = cursor.lastrowid
+    except HTTPException:
+        raise  # 业务错误（无待注册邮箱）保持 400
+    except Exception:
+        engine.abort_start()  # 异常路径释放启动占位，避免后续 /start 永久 400"已在运行中"
+        raise
 
     background_tasks.add_task(engine.run_batch, emails, task_id)
     add_log("info", f"批量注册任务已启动，共 {len(emails)} 个邮箱", {"task_id": task_id})
@@ -121,7 +127,7 @@ async def register_status() -> dict:
 @router.get("/accounts")
 async def list_accounts(status: str = "", limit: int = 100, offset: int = 0, search: str = "") -> dict:
     accounts = get_accounts(status=status, limit=limit, offset=offset, search=search)
-    total = len(get_accounts(status=status, search=search))
+    total = count_accounts(status=status, search=search)  # COUNT 查询，避免全表装载
     return {"accounts": accounts, "total": total}
 
 
@@ -282,7 +288,10 @@ async def _collect_export_accounts() -> list[dict]:
 
 
 def _get_chatgpt2api_admin_key() -> str:
-    """获取 chatgpt2api 管理密钥：优先本项目 config，其次读 chatgpt2api 自身 config。"""
+    """获取 chatgpt2api 管理密钥：优先本项目 config，其次读 chatgpt2api 自身 config。
+
+    不再回退硬编码弱默认凭据（原 'chatgpt2api'）；读不到返回空，由调用方明确提示。
+    """
     config = _load_config()
     key = str(config.get("chatgpt2api_admin_key") or "").strip()
     if key:
@@ -294,7 +303,7 @@ def _get_chatgpt2api_admin_key() -> str:
             key = str(d.get("auth-key") or d.get("auth_key") or "").strip()
     except Exception:
         pass
-    return key or "chatgpt2api"
+    return key
 
 
 @router.post("/export-accounts")
@@ -342,14 +351,17 @@ async def export_credentials() -> dict:
 @router.post("/push-chatgpt2api")
 async def push_chatgpt2api() -> dict:
     """把成功账号（含 refresh_token）推送导入到 chatgpt2api 账号池，自动去重 + 自动刷新。"""
-    accounts = await _collect_export_accounts()
-    if not accounts:
-        return {"success": False, "error": "没有可推送的账号（可能 refresh_token 全部失效）", "accounts": []}
-
     config = _load_config()
     base_url = str(config.get("chatgpt2api_url") or "http://127.0.0.1:23456").rstrip("/")
     url = f"{base_url}/api/accounts"
     key = _get_chatgpt2api_admin_key()
+    if not key:
+        add_log("error", "推送 chatgpt2api 失败：未配置 chatgpt2api_admin_key")
+        return {"success": False, "error": "未配置 chatgpt2api 管理密钥（config.chatgpt2api_admin_key）", "pushed": 0}
+
+    accounts = await _collect_export_accounts()
+    if not accounts:
+        return {"success": False, "error": "没有可推送的账号（可能 refresh_token 全部失效）", "accounts": []}
 
     try:
         resp = httpx.post(

@@ -18,9 +18,6 @@ class SettingsUpdateRequest(BaseModel):
     value: str
 
 
-# 命中这些关键词的配置项视为敏感（密钥/口令），对外脱敏展示
-SENSITIVE_KEY_HINTS = ("key", "password", "auth", "secret")
-
 # 允许通过设置接口修改的配置白名单。
 # 白名单外（尤其 auth_key）禁止写入，防止配置注入 / 覆盖鉴权密钥。
 ALLOWED_SETTINGS_KEYS = {
@@ -42,10 +39,16 @@ ALLOWED_SETTINGS_KEYS = {
 
 
 def _mask_sensitive(config: dict) -> dict:
-    """掩码敏感配置值，避免 auth_key / 管理密钥明文暴露到前端。"""
+    """掩码敏感配置值，避免 auth_key / 管理密钥明文暴露到前端。
+
+    只对以 key/password/secret 结尾的键掩码；auth_enforced 是布尔开关，不掩码（否则前端读不回）。
+    """
     out = {}
     for k, v in config.items():
-        if any(hint in str(k).lower() for hint in SENSITIVE_KEY_HINTS) and isinstance(v, str) and v:
+        low = str(k).lower()
+        if low == "auth_enforced":
+            out[k] = v
+        elif low.endswith(("key", "password", "secret")) and isinstance(v, str) and v:
             out[k] = "******"
         else:
             out[k] = v
