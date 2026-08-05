@@ -32,6 +32,23 @@ RESULT = ROOT / "data" / "refresh_results.jsonl"
 LOCK = ROOT / "data" / "refresh.lock"
 PER_ACCOUNT_TIMEOUT = 180  # 秒
 
+# verify_account_login 退出码语义（与脚本 EXIT_* 常量对齐）：
+#   0 成功 / 1 失败 / 2 需2FA / 3 cf_blocked / 4 unknown_page
+EXIT_NAMES = {
+    0: "success",
+    1: "fail",
+    2: "need_2fa",
+    3: "cf_blocked",
+    4: "unknown_page",
+}
+
+
+def _exit_reason(rc: int) -> tuple[bool, str]:
+    """把 verify 子进程退出码映射为 (是否可用, reason)。"""
+    if rc == 0:
+        return True, ""
+    return False, EXIT_NAMES.get(rc, f"exit_{rc}")
+
 
 def _acquire_lock() -> bool:
     """单实例锁：已有存活实例则拒绝启动"""
@@ -100,8 +117,7 @@ def main():
         )
         try:
             rc = p.wait(timeout=PER_ACCOUNT_TIMEOUT)
-            is_ok = rc == 0
-            reason = ""
+            is_ok, reason = _exit_reason(rc)
         except subprocess.TimeoutExpired:
             subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True)
             is_ok = False

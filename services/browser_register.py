@@ -32,11 +32,13 @@ from services.browser_selectors import (
     SWITCH_OTP_SELECTORS,
 )
 
-# OAuth PKCE 常量（与 chatgpt2api 同一 client，注册成功后可拿到 refresh_token 长期续期）
-OAUTH_CLIENT_ID = "app_2SKx67EdpoN0G6j64rFvigXD"
-OAUTH_REDIRECT_URI = "https://platform.openai.com/auth/callback"
-OAUTH_AUDIENCE = "https://api.openai.com/v1"
-OAUTH_AUTH0_CLIENT = "eyJuYW1lIjoiYXV0aDAtc3BhLWpzIiwidmVyc2lvbiI6IjEuMjEuMCJ9"
+# OAuth PKCE 常量：收敛到 services/constants.py（B5），此处保留别名供旧 import 向后兼容
+from services.constants import (
+    OAUTH_CLIENT_ID,
+    OAUTH_REDIRECT_URI,
+    OAUTH_AUDIENCE,
+    OAUTH_AUTH0_CLIENT,
+)
 
 
 def _generate_pkce() -> tuple[str, str]:
@@ -69,6 +71,9 @@ class BrowserRegister:
         self.config = config
         self.otp_timeout = _as_int(config.get("otp_wait_timeout_sec"), 120)
         self.otp_poll = _as_int(config.get("otp_poll_interval_sec"), 5)
+        # CF 挑战解不开时换代理重试次数（每次重试 = 关 context → 换代理 → 重新 goto）
+        # 默认 2：第一代理 CF 拦截，换一个出口 IP 再试一轮仍失败才降级 cf_blocked
+        self._cf_retry_max = _as_int(config.get("cf_retry_max"), 2)
 
     async def _wait_for_new_otp(self, email: str, password: str, client_id: str,
                                  refresh_token: str, old_mail_ids: set[str],
@@ -270,13 +275,50 @@ class BrowserRegister:
             action = decide_login_action(page_kind)
             add_log("info", f"[{email}] 页面形态: {page_kind} (动作: {action})")
 
-            # CF 挑战：先尝试自动解，解不了则明确标记 cf_blocked（不再裸超时）
+            # CF 挑战：先尝试自动解；解不开则换代理重试最多 _cf_retry_max 次，仍失败才 cf_blocked（不裸超时）
             if page_kind == "cf":
-                add_log("info", f"[{email}] 检测到 Cloudflare 挑战，尝试自动解...")
-                if not await self._resolve_cf(page, email):
+                cf_attempts = 0
+                cf_resolved = False
+                while cf_attempts <= self._cf_retry_max:
+                    add_log("info", f"[{email}] 检测到 Cloudflare 挑战，尝试自动解 (第 {cf_attempts + 1} 次)...")
+                    if await self._resolve_cf(page, email):
+                        cf_resolved = True
+                        break
+                    if cf_attempts >= self._cf_retry_max:
+                        break
+                    # 换代理重试：关当前 context，从池取下一个代理开新 context 重新 goto
+                    new_proxy = proxy_service.get_next() if self.config.get("use_proxy", False) else None
+                    if not new_proxy:
+                        add_log("warning", f"[{email}] CF 未解且代理池空，不再重试")
+                        break
+                    add_log("info", f"[{email}] CF 未解，换代理重试: {proxy_service.format_for_display(new_proxy)}")
+                    proxy_url = new_proxy
+                    # 同步更新 result["proxy"]，避免落库记录的是换代理前的旧代理
+                    result["proxy"] = proxy_service.format_for_display(new_proxy)
+                    try:
+                        await context.close()
+                    except Exception:
+                        pass
+                    # 新 context/page 创建可能抛异常（代理无效/浏览器卡死），必须有兜底：
+                    # 失败则跳出循环直接 cf_blocked，避免 page 悬空后续访问 NPE
+                    try:
+                        ctx_kwargs2: dict[str, Any] = {"proxy": {"server": new_proxy}} if new_proxy else {}
+                        context = await browser.new_context(**ctx_kwargs2)
+                        page = await context.new_page()
+                    except Exception as e:
+                        add_log("warning", f"[{email}] 换代理后创建 context 失败，降级 cf_blocked: {e}")
+                        break
+                    try:
+                        await page.goto(entry_url, wait_until="networkidle", timeout=60000)
+                        await asyncio.sleep(5)
+                    except Exception as e:
+                        add_log("warning", f"[{email}] 换代理后 goto 异常: {e}")
+                    cf_attempts += 1
+
+                if not cf_resolved:
                     result["status"] = "cf_blocked"
                     result["error"] = "Cloudflare 人机验证无法自动通过"
-                    add_log("warning", f"[{email}] CF 挑战未通过")
+                    add_log("warning", f"[{email}] CF 挑战未通过 (尝试 {cf_attempts + 1} 次)")
                     return result
                 inputs = await self._collect_page_inputs(page)
                 page_kind = detect_login_page(page.url, await self._page_html(page), inputs)

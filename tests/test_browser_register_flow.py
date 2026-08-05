@@ -204,7 +204,13 @@ class TestRegisterOneBranches:
         assert "验证码等待超时" in result["error"]
 
     async def test_cf_page_returns_cf_blocked(self, isolated_db, fake_browser_env, monkeypatch):
+        """CF 页且换代理重试用尽后仍失败 → cf_blocked（不再裸超时）。
+
+        新语义（C3 修复）：_resolve_cf 失败后会换代理重试最多 CF_RETRY 次，
+        全部失败才返回 cf_blocked。本测试把重试次数压到 0 以保留原断言语义。
+        """
         reg = _make_register()
+        monkeypatch.setattr(reg, "_cf_retry_max", 0)  # 不重试，直接降级
 
         async def inputs(page):
             return []
@@ -220,3 +226,46 @@ class TestRegisterOneBranches:
         result = await reg.register_one("u@example.com", "p", "cid", "rt")
         assert result["status"] == "cf_blocked"
         assert "Cloudflare" in result["error"]
+
+    async def test_cf_page_recovers_after_proxy_rotate(self, isolated_db, fake_browser_env, monkeypatch):
+        """CF 页 → 换代理重试 → 第二次 _resolve_cf 成功 → 进入邮箱页走验证码流程。
+
+        验证 CF 重试 + 代理轮换闭环：失败一次不直接放弃，换代理后能恢复。
+        """
+        reg = _make_register()
+        monkeypatch.setattr(reg, "_cf_retry_max", 2)
+        reg.config["use_proxy"] = True
+
+        # 独立计数器：detect_count 决定 inputs/html 形态；resolve_count 决定 resolve 成败
+        state = {"detect": 0, "resolve": 0}
+
+        async def inputs(page):
+            state["detect"] += 1
+            # 第 1 次检测（初始）是 CF 页；第 2 次检测（解 CF 后）是邮箱页
+            return [] if state["detect"] == 1 else ["email"]
+
+        async def html(page):
+            return "Just a moment..." if state["detect"] == 1 else ""
+
+        async def maybe_resolve(page, email, max_attempts=3):
+            state["resolve"] += 1
+            # 第 1 次 resolve 失败（触发换代理），第 2 次成功
+            return state["resolve"] > 1
+
+        async def fake_wait_otp(*a, **k):
+            return None  # 验证码超时 → 明确报错早退
+
+        monkeypatch.setattr(reg, "_collect_page_inputs", inputs)
+        monkeypatch.setattr(reg, "_page_html", html)
+        monkeypatch.setattr(reg, "_resolve_cf", maybe_resolve)
+        monkeypatch.setattr(reg, "_wait_for_new_otp", fake_wait_otp)
+        import services.browser_register as br
+        monkeypatch.setattr(br.proxy_service, "get_next",
+                            lambda: "http://user:pass@host:1000")
+
+        result = await reg.register_one("u@example.com", "p", "cid", "rt")
+        # 换代理后 CF 解开 → 进入邮箱页 → 验证码超时明确失败（不卡 180s）
+        assert result["status"] == "failed", f"应进入邮箱页后验证码超时失败，实际 {result}"
+        assert "验证码等待超时" in result["error"]
+        # 确认确实发生了重试（resolve 被调用 ≥ 2 次）
+        assert state["resolve"] >= 2, f"CF 应重试，resolve 调用 {state['resolve']} 次"

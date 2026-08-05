@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>v2.1 终局闭环审计变更报告</title>
+<style>
+:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#c9d1d9;--muted:#8b949e;--green:#3fb950;--red:#f85149;--yellow:#d29922;--blue:#58a6ff}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,"Segoe UI",system-ui,sans-serif;background:var(--bg);color:var(--text);line-height:1.7;padding:20px;max-width:980px;margin:0 auto}
+h1{color:var(--blue);border-bottom:1px solid var(--border);padding-bottom:10px;margin-bottom:20px;font-size:1.6em}
+h2{color:var(--green);margin:30px 0 12px;font-size:1.25em;border-left:3px solid var(--green);padding-left:10px}
+h3{color:var(--blue);margin:18px 0 8px;font-size:1.05em}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px;margin:12px 0}
+.code{background:#1f2428;border:1px solid var(--border);border-radius:4px;padding:10px;font-family:"Consolas",monospace;font-size:0.9em;overflow-x:auto;color:#e6edf3;white-space:pre-wrap;margin:8px 0}
+.tag{display:inline-block;padding:2px 8px;border-radius:12px;font-size:0.8em;font-weight:600;margin:0 4px}
+.p0{background:rgba(248,81,73,.2);color:var(--red);border:1px solid var(--red)}
+.p1{background:rgba(210,153,34,.2);color:var(--yellow);border:1px solid var(--yellow)}
+.p2{background:rgba(63,185,80,.15);color:var(--green);border:1px solid var(--green)}
+.done{color:var(--green)}
+.todo{color:var(--yellow)}
+ul{margin:10px 0 10px 24px}li{margin:4px 0}
+.quiz{background:#0d2137;border:1px solid var(--blue);border-radius:8px;padding:16px;margin:16px 0}
+.quiz q{display:block;margin:10px 0;font-weight:600}
+.quiz .ans{color:var(--muted);font-size:.9em;margin-top:6px}
+.summary-box{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:16px 0}
+.summary-box .stat{text-align:center;background:var(--card);padding:14px;border-radius:8px;border:1px solid var(--border)}
+.stat .num{font-size:1.8em;font-weight:700;color:var(--blue)}
+.stat .lbl{color:var(--muted);font-size:.85em}
+footer{margin-top:40px;padding-top:16px;border-top:1px solid var(--border);color:var(--muted);font-size:.85em}
+</style>
+</head>
+<body>
+<h1>v2.1 终局闭环审计变更报告</h1>
+<p style="color:var(--muted)">GPT 自动注册项目 · 2026-08-06 · 基于证据，非理想状态</p>
+
+<div class="summary-box">
+<div class="stat"><div class="num">4</div><div class="lbl">自造漏洞修复</div></div>
+<div class="stat"><div class="num">207</div><div class="lbl">pytest 全绿</div></div>
+<div class="stat"><div class="num">+17</div><div class="lbl">新增测试</div></div>
+</div>
+
+<h2>1. 上下文与直觉</h2>
+<div class="card">
+<p>用户报告 <code>refresh_all.py</code> 批量刷新大量账号 <strong>180s 超时强杀</strong>。初始诊断写的是 <code>input[name=email] 15s 超时</code>，但代码考古发现：</p>
+<ul>
+<li><span class="tag p1">校准</span> 诊断行号对不上当前代码——verify 等的是 <code>current-password</code> 20s，不是 email 15s</li>
+<li><span class="tag p0">根因</span> <code>verify_account_login.py.run()</code> 是<strong>孤儿旧代码</strong>：没复用 <code>browser_register.py</code> 已有的 <code>detect_login_page</code>/<code>_resolve_cf</code> 形态分流</li>
+<li>遇到 CF 挑战页或 OpenAI 改版页就裸等密码框 + 裸等 OAuth code，最坏撞 180s 强杀</li>
+<li><span class="tag p1">证据</span> <code>refresh_batch.log</code> 实测：行 1-24 成功，行 25+ 全 180s 超时——系统曾工作过，运行中出问题</li>
+</ul>
+</div>
+
+<h2>2. 做了什么（诚实分层）</h2>
+
+<h3>Phase 1: 修自己 4 个漏洞 <span class="tag p0">P0 止血</span></h3>
+<div class="card">
+<ol>
+<li><strong>verify 截图静默吞错</strong>：原 <code>try/except: pass</code> 吞了"目录不存在"错误（违宪）。修：<code>data/debug/</code> 用 <code>mkdir(parents=True, exist_ok=True)</code> 自动创建。</li>
+<li><strong>退出码契约断</strong>：verify 返回码 3/4 但 <code>refresh_all.py</code> 仍记 <code>exit=1</code>、reason 空。修：加 <code>EXIT_NAMES</code> 映射，rc=3→<code>cf_blocked</code>，rc=4→<code>unknown_page</code>。</li>
+<li><strong>CF 重试资源泄漏</strong>：换代理时 <code>new_context</code> 抛异常会让 <code>page</code> 悬空、<code>finally</code> 二次 close 再抛。修：包进 try/except，失败 break 到 <code>cf_blocked</code>。</li>
+<li><strong>token 回写静默丢失</strong>：<code>_writeback_token</code> 返回 False 时 verify 仍报 <code>EXIT_SUCCESS</code>。修：返回 False 则 <code>EXIT_FAIL</code>。</li>
+</ol>
+</div>
+
+<h3>Phase 2: 核心链路 <span class="tag p1">校准</span></h3>
+<div class="card">
+<p>校准发现：C2（去重 O(1)）+ D2（任务表落库）<strong>已在 v2.0 闭环</strong>（<code>register_engine.py:164-165</code> 预加载集合 + 每号 <code>update_task_progress</code>）。上次需求矩阵过时。本次无需重修。</p>
+</div>
+
+<h3>Phase 3: 架构收敛（DRY） <span class="tag p2">P2</span></h3>
+<div class="card">
+<ul>
+<li><strong>B3 OTP 三合一</strong>：新建 <code>services/otp_extractor.py</code>。三份完全相同的正则（font-24px > bg-F3F3F3 > max(6位)，排除全同数字 + 90210 等黑名单）收敛为一处。三 service 单行委托。</li>
+<li><strong>B5 常量集中</strong>：新建 <code>services/constants.py</code>。OAuth client_id 等 6 处硬编码收敛。<code>browser_register.py</code> 内联改为 import + 保留别名向后兼容。</li>
+</ul>
+</div>
+
+<h3>Phase 4: 治理资产</h3>
+<div class="card">
+<ul>
+<li><strong>ADR-005</strong>：<code>docs/ADR/ADR-005.md</code> 记录终局审计决策</li>
+<li><strong>Spec-Kit 三件套</strong>：<code>.specify/specs/v2.1-final-audit/</code>（spec/plan/tasks）</li>
+<li><strong>工作流 skill</strong>：<code>.claude/skills/final-audit-workflow/</code> + <code>critical-code-reviewer/</code></li>
+<li><strong>workflow_status.md</strong> 增量更新</li>
+<li><strong>记忆更新</strong>：v2.1 状态写入持久记忆</li>
+</ul>
+</div>
+
+<h2>3. 关键代码改动</h2>
+<div class="code">verify_account_login.py — 形态分流
+    from services.login_detector import detect_login_page, decide_login_action
+    inputs = await reg._collect_page_inputs(page)
+    page_kind = detect_login_page(page.url, await reg._page_html(page), inputs)
+    if page_kind == "cf":
+        if not await reg._resolve_cf(page, email): return EXIT_CF_BLOCKED  # 码3早退
+    if action == "fail":
+        debug_dir.mkdir(parents=True, exist_ok=True)  # 不再静默吞
+        return EXIT_UNKNOWN_PAGE  # 码4早退</div>
+
+<div class="code">browser_register.py — CF 重试资源安全
+    try:
+        context = await browser.new_context(**ctx_kwargs2)
+        page = await context.new_page()
+    except Exception as e:
+        break  # 跳到 cf_blocked，page 不悬空</div>
+
+<div class="code">otp_extractor.py — 三合一
+    def extract_otp_code(body_html):
+        m = _FONT_24PX.search(body_html)  # 优先大字号
+        if m and _is_valid_code(m.group(1)): return m.group(1)
+        m = _BG_F3F3F3.search(body_html)  # 次选高亮
+        ...
+        return max(valid)  # 兜底取最大（和原三份行为一致）</div>
+
+<h2>4. 验证证据</h2>
+<div class="card">
+<ul>
+<li class="done">✅ <code>pytest tests/ -q</code> → 207 全绿（+17 新增）</li>
+<li class="done">✅ <code>tests/test_verify_account_login_branches.py</code> 3 测试：CF/unknown/password 分流</li>
+<li class="done">✅ <code>tests/test_browser_register_flow.py</code> CF recovery + 资源安全</li>
+<li class="done">✅ <code>tests/test_otp_extractor.py</code> 13 测试：三合一行为一致</li>
+<li class="todo">⚠️ verify 修复仅 mock 验证——无真实账号可跑，真实 CF Turnstile 未实跑</li>
+<li class="todo">⚠️ 常量收敛仅 browser_register，revive_import/protocol_register 6 处中 4 处长尾未迁</li>
+</ul>
+</div>
+
+<h2>5. 诚实边界（未闭环项）</h2>
+<div class="card">
+<p>单次会话无法真实闭环 70+ 项长尾。以下沉淀到 <code>.specify/specs/v2.1-final-audit/tasks.md</code>，后续会话续：</p>
+<ul>
+<li class="todo">H3 浏览器池复用（CamoufoxPool）</li>
+<li class="todo">F1-F7 前端 UI/UX 全面升级</li>
+<li class="todo">G1 token 保鲜后台任务</li>
+<li class="todo">B1 双引擎统一（registration_flow.py）</li>
+<li class="todo">revive_import/protocol_register 常量迁移</li>
+<li class="todo">D3 健康检查 /api/healthz</li>
+<li class="todo">A4 失败分级与重试策略 / A6 并发落地</li>
+</ul>
+</div>
+
+<h2>6. 变更测验</h2>
+<div class="quiz">
+<p>以下测验必须通过，确认你理解本次变更：</p>
+
+<q>Q1: verify_account_login.py 遇到 CF 挑战页时，现在返回什么退出码？</q>
+<div class="ans">答：3 (EXIT_CF_BLOCKED)。refresh_all.py 据此记 reason=cf_blocked。</div>
+
+<q>Q2: 遇到 unknown 页（无 email/password/code input），verify 返回什么码？截图落到哪？</q>
+<div class="ans">答：4 (EXIT_UNKNOWN_PAGE)。截图落 data/debug/verify_unknown_*.png，目录不存在自动创建。</div>
+
+<q>Q3: browser_register CF 重试时，new_context 抛异常会怎样？</q>
+<div class="ans">答：try/except 捕获 → break 跳出循环 → 返回 cf_blocked。page 不悬空，避免 finally 二次 close 再抛。</div>
+
+<q>Q4: _writeback_token 返回 False（数据库不可达）时，verify 返回什么？</q>
+<div class="ans">答：EXIT_FAIL (1)。token 已获取但未持久化不再静默报成功。</div>
+
+<q>Q5: OTP 提取三合一后，三个 email service 的行为和原来一致吗？兜底取第几个？</q>
+<div class="ans">答：一致。font-24px > bg-F3F3F3 > max(所有非全同/非黑名单 6 位数字)。全同数字(111111)与地址邮编(90210等)排除。</div>
+
+<q>Q6: C2 去重 O(1) 和 D2 任务表落库——本次新修的吗？</q>
+<div class="ans">答：否。校准发现已在 v2.0 闭环（register_engine.py:164-165 预加载集合 + 每号 update_task_progress）。本次需求矩阵过时，无需重修。</div>
+
+<q>Q7: verify 修复验证了真实 CF 页吗？为什么？</q>
+<div class="ans">答：没有。无真实账号可跑，仅 mock 验证早退逻辑。真实 CF Turnstile 点不掉时仍需人工/换代理，但已明确标记 cf_blocked 不再卡 180s。这是诚实边界。</div>
+</div>
+
+<footer>
+<p>本报告由 final-audit-workflow 工作流生成 · 证据驱动 · 禁止伪闭环</p>
+<p>关联：ADR-005 · .specify/specs/v2.1-final-audit/ · GitHub Release v2.1</p>
+</footer>
+</body>
+</html>

@@ -156,30 +156,9 @@ class EmailService:
             return ""
 
     def extract_otp_code(self, body_html: str) -> str | None:
-        """从 ChatGPT 验证邮件 HTML 中提取 6 位验证码。
-        优先提取大字体验证码（font-size: 24px 区域的），
-        其次提取灰色背景验证码区域，最后提取所有 6 位数字中最大的一个。
-        """
-        if not body_html:
-            return None
-        # 方法1: 匹配大字体验证码区域（font-size: 24px 背景的 6 位数字）
-        m = re.search(r'font-size:\s*24px[^>]*>.*?(\d{6})', body_html, re.DOTALL)
-        if m and not re.match(r'^(\d)\1{5}$', m.group(1)):
-            return m.group(1)
-        # 方法2: 匹配灰色背景验证码区域（background-color: #F3F3F3 的 6 位数字）
-        m = re.search(r'background-color:\s*#F3F3F3[^>]*>.*?(\d{6})', body_html, re.DOTALL)
-        if m and not re.match(r'^(\d)\1{5}$', m.group(1)):
-            return m.group(1)
-        # 方法3: 提取所有 6 位数字，排除重复数字和明显非验证码的
-        codes = re.findall(r'\b(\d{6})\b', body_html)
-        valid_codes = [
-            c for c in codes
-            if not re.match(r'^(\d)\1{5}$', c)
-            and c not in ('90210', '90230', '10000', '20000', '30000', '40000', '50000', '60000', '70000', '80000', '90000')
-        ]
-        if valid_codes:
-            return max(valid_codes)
-        return None
+        """从 ChatGPT 验证邮件 HTML 中提取 6 位验证码（委托公共模块，B3 三合一）。"""
+        from services.otp_extractor import extract_otp_code as _extract
+        return _extract(body_html)
 
     async def wait_for_otp(self, email: str, password: str, client_id: str,
                            refresh_token: str, timeout_sec: int = 120,

@@ -80,25 +80,9 @@ class ImapEmailService:
         return None
 
     def _extract_otp(self, body: str) -> str | None:
-        """从邮件正文中提取 6 位验证码"""
-        # 方法1: 匹配大字体验证码区域
-        m = re.search(r'font-size:\s*24px[^>]*>.*?(\d{6})', body, re.DOTALL)
-        if m and not re.match(r'^(\d)\1{5}$', m.group(1)):
-            return m.group(1)
-        # 方法2: 匹配灰色背景验证码区域
-        m = re.search(r'background-color:\s*#F3F3F3[^>]*>.*?(\d{6})', body, re.DOTALL)
-        if m and not re.match(r'^(\d)\1{5}$', m.group(1)):
-            return m.group(1)
-        # 方法3: 提取所有 6 位数字，返回最大的
-        codes = re.findall(r'\b(\d{6})\b', body)
-        valid = [
-            c for c in codes
-            if not re.match(r'^(\d)\1{5}$', c)
-            and c not in ('90210', '90230', '10000', '20000', '30000', '40000', '50000', '60000', '70000', '80000', '90000')
-        ]
-        if valid:
-            return max(valid)
-        return None
+        """从邮件正文中提取 6 位验证码（委托公共模块，B3 三合一）。"""
+        from services.otp_extractor import extract_otp_code as _extract
+        return _extract(body)
 
 
 imap_email_service = ImapEmailService()

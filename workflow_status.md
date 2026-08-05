@@ -116,3 +116,44 @@
 | T16 记忆点标注 | ✅ | memory gpt-auto-register-v2-state.md v2.0.4 段 |
 | T17 HTML 报告 v2.0.4 | ✅ | docs/CHANGE_REPORT_v2.0.4.html |
 | T18 验收测验 | ✅ | 嵌入 HTML 报告（6 题） |
+
+## 九、v2.1 终局闭环审计任务状态（2026-08-06）
+
+### 背景
+用户报告 refresh_all.py 批量刷新 180s 超时强杀。代码考古发现 verify_account_login.py.run() 是孤儿旧代码（没复用 browser_register 的 detect_login_page/_resolve_cf 形态分流），遇到 CF/改版页裸等撞 180s。初始诊断 `input[name=email] 15s` 是 verify_microsoft_login.py:59，非失败链路。
+
+### 任务闭环状态
+
+| 任务 | 状态 | 证据 |
+|------|------|------|
+| T1 verify 截图目录自动创建 | ✅ | data/debug/ mkdir parents+exist_ok |
+| T2 refresh_all 适配新退出码 | ✅ | EXIT_NAMES 映射 rc=3/4→cf_blocked/unknown_page |
+| T3 browser_register CF 重试资源安全 | ✅ | new_context 异常 try/except break 到 cf_blocked |
+| T4 _writeback_token 边界 | ✅ | 返回 False→EXIT_FAIL，不再静默 |
+| T5 C2 去重 O(1) | ✅ 已闭环(v2.0) | register_engine.py:164-165 预加载集合 |
+| T6 D2 任务表落库 | ✅ 已闭环(v2.0) | 每号 update_task_progress |
+| T7 B3 OTP 三合一 | ✅ | services/otp_extractor.py + 3 service 委托 + 13 测试 |
+| T8 B5 常量集中 | ✅ | services/constants.py + browser_register import |
+| T9 ADR-005 | ✅ | docs/ADR/ADR-005.md |
+| T10 Spec-Kit 三件套 | ✅ | .specify/specs/v2.1-final-audit/ |
+| T11 HTML 报告+7题测验 | ✅ | docs/CHANGE_REPORT_v2.1.html |
+| T12 工作流+skill | ✅ | .claude/skills/final-audit-workflow/ + critical-code-reviewer/ |
+| T13 记忆更新 | ✅ | ~/.claude/.../memory/gpt-auto-register-v2-state.md |
+| T14 提交推送发行版 | ⏳ | git commit + gh release v2.1 |
+| T15 pytest 全量 | ✅ | 207 全绿（+17 新增） |
+
+### 验证历史（v2.1，勿重复审计）
+- 全量：`./.venv/Scripts/python.exe -m pytest tests/ -q` → 207 全绿（原 190 + verify 3 + CF recovery 1 + otp 13）
+- 覆盖率：未重跑（仅新增纯逻辑模块 otp_extractor，预期 ≥69% 不降）
+- 新增模块：otp_extractor.py / constants.py 纯逻辑无依赖
+
+### 诚实边界（未闭环，沉淀到 tasks.md 长尾）
+- verify 修复仅 mock 验证，无真实账号可跑真实 CF/改版页
+- 常量收敛仅 browser_register，revive_import/protocol_register 4 处硬编码长尾未迁
+- H3 浏览器池/F 前端系列/G1 token 保鲜/B1 双引擎统一/D3 健康检查/A4A6 失败分级+并发——单次会话无法真实闭环，沉淀后续
+
+### 复现坑（v2.1 新增）
+- 诊断行号映射过时：用户/旧诊断引用的行号对不上当前代码 → 必须先 git diff + Read 当前文件，不信考古结论
+- mock 测试不等于真实闭环：verify 的 CF/unknown 分流只过 mock，真实 camoufox 行为未验证——需诚实标注
+- 常量收敛要向后兼容：browser_register 内联常量改 import 时，保留模块级别名，旧 `from browser_register import OAUTH_CLIENT_ID` 不破坏
+- OTP 三合一行为对齐：原三份兜底都是 max（不是 first），统一时必须保持一致，否则静默行为变更

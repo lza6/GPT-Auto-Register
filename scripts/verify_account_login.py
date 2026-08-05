@@ -40,6 +40,18 @@ from services.browser_register import (
 
 RESULT_FILE = ROOT / "data" / "refresh_results.jsonl"
 
+# 退出码语义（供 refresh_all.py 判定与结果文件记录）：
+#   0  成功（已换 token 并回写）
+#   1  失败（密码错 / 账号不存在 / code 换 token 失败等业务失败）
+#   2  需要 2FA 应用验证（人工介入）
+#   3  cf_blocked（Cloudflare 挑战无法自动通过，需换代理或人工）
+#   4  unknown_page（页面改版 / 无法识别，需人工看页面摘要适配）
+EXIT_SUCCESS = 0
+EXIT_FAIL = 1
+EXIT_NEED_2FA = 2
+EXIT_CF_BLOCKED = 3
+EXIT_UNKNOWN_PAGE = 4
+
 
 def _pick_account(email: str | None) -> dict:
     conn = sqlite3.connect(str(ROOT / "data" / "register.db"))
@@ -110,6 +122,22 @@ def _save_result(email: str, success: bool, exit_code: int, reason: str = ""):
         f.write(json.dumps({"email": email, "success": success, "exit": exit_code, "reason": reason}, ensure_ascii=False) + "\n")
 
 
+def _writeback_token(email: str, access_token: str, refresh_token: str, id_token: str) -> bool:
+    """把刷新后的 token 三件套回写 accounts 表，返回是否成功。"""
+    try:
+        conn = sqlite3.connect(str(ROOT / "data" / "register.db"))
+        conn.execute(
+            "UPDATE accounts SET access_token=?, openai_refresh_token=?, id_token=?, status='success' WHERE email=?",
+            (access_token, refresh_token, id_token, email),
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"   [警告] 回写失败: {e}")
+        return False
+
+
 async def run(email: str, openai_pw: str, ms_password: str, ms_client_id: str,
               ms_refresh_token: str, proxy_url: str | None, headful: bool) -> int:
     reg = BrowserRegister({
@@ -145,20 +173,81 @@ async def run(email: str, openai_pw: str, ms_password: str, ms_client_id: str,
     page = await context.new_page()
 
     try:
+        # ── Step 1: 访问 authorize 页（单次 goto，超时即早退；不再 try/except 重试 goto 避免叠加超时撞 180s 强杀） ──
         try:
             await page.goto(authorize_url, wait_until="commit", timeout=45000)
-        except Exception:
-            await page.goto(authorize_url, wait_until="commit", timeout=45000)
+        except Exception as e:
+            print(f"   [跳过] authorize 页打不开: {e}")
+            return EXIT_FAIL
         await asyncio.sleep(6)
 
-        # 密码输入框（邮箱已预填）
+        # ── Step 2: 页面形态检测与分流（复用 browser_register + login_detector） ──
+        # 此前只等 input[name=current-password]，CF 挑战页 / OpenAI 改版页会裸超时 20s
+        # 叠加后续 2 轮 _wait_for_oauth_code(15s) 循环，最坏撞 180s 强杀。
+        from services.login_detector import (
+            detect_login_page, decide_login_action, summarize_page_text,
+        )
+        inputs = await reg._collect_page_inputs(page)
+        page_kind = detect_login_page(page.url, await reg._page_html(page), inputs)
+        action = decide_login_action(page_kind)
+        print(f"   [页面形态] {page_kind} (动作: {action})")
+
+        # CF 挑战页：尝试自动解，解不了明确早退 cf_blocked（不裸等密码框）
+        if page_kind == "cf":
+            print("   [CF] 检测到 Cloudflare 挑战，尝试自动解...")
+            if not await reg._resolve_cf(page, email):
+                print("   ❌ Cloudflare 挑战无法自动通过")
+                return EXIT_CF_BLOCKED
+            # 解 CF 后重新识别形态
+            inputs = await reg._collect_page_inputs(page)
+            page_kind = detect_login_page(page.url, await reg._page_html(page), inputs)
+            action = decide_login_action(page_kind)
+            print(f"   [页面形态] 解 CF 后: {page_kind}")
+
+        # unknown 页：明确早退，附带页面文字摘要便于后续适配上游改版
+        if action == "fail":
+            body_text = summarize_page_text(await reg._page_body_text(page))
+            # 截图落 data/debug/，目录不存在自动创建（宪法：禁止静默吞错）
+            debug_dir = ROOT / "data" / "debug"
+            try:
+                debug_dir.mkdir(parents=True, exist_ok=True)
+                await page.screenshot(path=str(debug_dir / f"verify_unknown_{email.split('@')[0]}.png"))
+            except Exception as e:
+                print(f"   [警告] 截图失败: {e}")
+            print(f"   ❌ 无法识别登录页: {page.url[:80]}, 文字: {body_text[:200]}")
+            return EXIT_UNKNOWN_PAGE
+
+        # 已在 callback 页：直接捕 code 换 token（无需密码登录）
+        if page_kind == "callback":
+            print("   [回调] 已在回调页，直接捕获 OAuth code...")
+            code = await reg._wait_for_oauth_code(page, timeout=15)
+            if code:
+                tokens = await reg._exchange_code(code, verifier, proxy_url)
+                if tokens and tokens.get("access_token"):
+                    at = tokens.get("access_token", "")
+                    rt = tokens.get("refresh_token", "")
+                    it = tokens.get("id_token", "")
+                    print(f"   ✅ 回调页换 token 成功 ({_jwt_peek(at)})")
+                    _writeback_token(email, at, rt, it)
+                    return EXIT_SUCCESS
+            print("   ❌ 回调页但未捕到 OAuth code")
+            return EXIT_FAIL
+
+        # email / otp / about-you 形态：本脚本是"密码登录验证"流程，这些形态意味着
+        # 账号还没设密码或已处于注册中途——明确早退，避免裸等密码框
+        if action in ("fill_email", "wait_otp", "switch_otp_login", "skip_login"):
+            # skip_login (about-you) 不是密码登录场景；fill_email/wait_otp 说明账号未设密码
+            print(f"   [跳过] 当前页面形态 {page_kind} 不适用密码登录流程")
+            return EXIT_FAIL
+
+        # ── Step 3: 密码登录页（current-password 可见）→ 填 OpenAI 密码 ──
         pwd_input = page.locator('input[name="current-password"]').first
         try:
             await pwd_input.wait_for(state="visible", timeout=20000)
         except Exception:
             body = await page.evaluate("() => document.body ? document.body.innerText.slice(0,200) : ''") or ""
             print(f"   [跳过] 未到密码页, URL: {page.url[:80]}, 页面: {body[:100]}")
-            return 1
+            return EXIT_FAIL
 
         await pwd_input.click()
         await pwd_input.fill("")
@@ -188,11 +277,11 @@ async def run(email: str, openai_pw: str, ms_password: str, ms_client_id: str,
             if "incorrect" in low or "wrong password" in low or "invalid password" in low:
                 reason = "密码错误"
                 print("   ❌ 密码错误")
-                return 1
+                return EXIT_FAIL
             if "account doesn't exist" in low or "not found" in low:
                 reason = "账号不存在"
                 print("   ❌ 账号不存在")
-                return 1
+                return EXIT_FAIL
 
             # 二次验证码（email-verification / 2FA）
             vcode_input = page.locator('input[name="code"], input[autocomplete="one-time-code"], input[inputmode="numeric"]').first
@@ -206,7 +295,7 @@ async def run(email: str, openai_pw: str, ms_password: str, ms_client_id: str,
                 if not vcode:
                     reason = "二次验证码未收到"
                     print("   ❌ 二次验证码未收到")
-                    return 1
+                    return EXIT_FAIL
                 await vcode_input.click()
                 await vcode_input.fill("")
                 await page.keyboard.type(vcode, delay=50)
@@ -221,40 +310,33 @@ async def run(email: str, openai_pw: str, ms_password: str, ms_client_id: str,
             if "two-step" in low or "authenticator" in low:
                 reason = "需2FA应用验证"
                 print("   ⚠️ 需要 2FA 应用验证，跳过")
-                return 2
+                return EXIT_NEED_2FA
 
             reason = f"未知页面: {cur[:80]}"
             break
 
         if not code:
             print(f"   ❌ {reason}")
-            return 1
+            return EXIT_FAIL
 
         # 换 token 三件套并回写
         tokens = await reg._exchange_code(code, verifier, proxy_url)
         if not tokens or not tokens.get("access_token"):
             print("   ❌ code 换 token 失败")
-            return 1
+            return EXIT_FAIL
 
         at = tokens.get("access_token", "")
         rt = tokens.get("refresh_token", "")
         it = tokens.get("id_token", "")
         print(f"   ✅ 登录成功! access_token len={len(at)} ({_jwt_peek(at)}), refresh_token {'✅' if rt else '❌'}")
-        try:
-            conn = sqlite3.connect(str(ROOT / "data" / "register.db"))
-            conn.execute(
-                "UPDATE accounts SET access_token=?, openai_refresh_token=?, id_token=?, status='success' WHERE email=?",
-                (at, rt, it, email),
-            )
-            conn.commit()
-            conn.close()
-            print("   ✅ 已回写 token 到数据库")
-        except Exception as e:
-            print(f"   [警告] 回写失败: {e}")
-        return 0
+        if not _writeback_token(email, at, rt, it):
+            print("   ❌ token 回写数据库失败（token 已获取但未持久化）")
+            return EXIT_FAIL
+        print("   ✅ 已回写 token 到数据库")
+        return EXIT_SUCCESS
     except Exception as e:
         print(f"   [异常] {e}")
-        return 1
+        return EXIT_FAIL
     finally:
         try:
             await context.close()
