@@ -15,6 +15,9 @@ data/
 *.log
 *.png
 
+# Camoufox 离线安装包（约 500MB，超 GitHub 单文件限制，勿提交）
+tools/camoufox/*.zip
+
 # 敏感配置 & 代理凭据
 config.json
 proxies.txt

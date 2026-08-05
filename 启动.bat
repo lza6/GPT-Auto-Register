@@ -108,11 +108,11 @@ rem Check camoufox browser data downloaded (needed by CF solver / browser fallba
 rem NOTE: real install dir on Windows is %LOCALAPPDATA%\camoufox\camoufox\Cache (camoufox.pkgman.INSTALL_DIR), NOT ~/.camoufox
 "%VENV_PY%" -c "from camoufox.pkgman import INSTALL_DIR; b=INSTALL_DIR/'browsers'; exit(0 if (b.is_dir() and list(b.iterdir())) else 1)" 2>nul
 if errorlevel 1 (
-    echo       Downloading camoufox browser data (first run, ~900MB)...
-    for /f "delims=" %%T in ('gh auth token 2^>nul') do set "GITHUB_TOKEN=%%T"
-    "%VENV_PY%" -m camoufox fetch
+    echo       Camoufox browser data missing, installing...
+    rem 优先离线 zip（tools\camoufox\*.zip），无则在线下载，失败会打印手动下载指引
+    powershell -NoProfile -ExecutionPolicy Bypass -File install_camoufox.ps1
     if errorlevel 1 (
-        echo [WARN] camoufox data download failed
+        echo [WARN] camoufox data install failed, CF verification may be unavailable
     )
 )
 echo       Dependencies installed
