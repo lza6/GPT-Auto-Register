@@ -20,14 +20,29 @@ async def pending_emails(limit: int = 100) -> dict:
 
 
 @router.get("/")
-async def list_emails(status: str = "") -> dict:
+async def list_emails(status: str = "", limit: int = 0, offset: int = 0, search: str = "") -> dict:
+    """邮箱池列表，支持状态筛选 / 邮箱搜索 / 分页。"""
     conn = get_conn()
+    conds: list[str] = []
+    params: list = []
     if status:
-        rows = conn.execute("SELECT * FROM emails WHERE status = ? ORDER BY id DESC", (status,)).fetchall()
-    else:
-        rows = conn.execute("SELECT * FROM emails ORDER BY id DESC").fetchall()
+        conds.append("status = ?")
+        params.append(status)
+    if search:
+        conds.append("email LIKE ?")
+        params.append(f"%{search.strip()}%")
+    where = (" WHERE " + " AND ".join(conds)) if conds else ""
+    rows = conn.execute(
+        f"SELECT * FROM emails{where} ORDER BY id DESC", params
+    ).fetchall()
+    total = len(rows)
+    if limit > 0:
+        rows = conn.execute(
+            f"SELECT * FROM emails{where} ORDER BY id DESC LIMIT ? OFFSET ?",
+            params + [limit, offset],
+        ).fetchall()
     conn.close()
-    return {"emails": [dict(r) for r in rows], "total": len(rows)}
+    return {"emails": [dict(r) for r in rows], "total": total}
 
 
 @router.post("/manual-add")

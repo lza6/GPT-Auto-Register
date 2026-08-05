@@ -174,10 +174,12 @@ class EmailService:
                            refresh_token: str, timeout_sec: int = 120,
                            poll_interval: int = 5,
                            after_time: float | None = None,
-                           skip_existing: bool = True) -> str | None:
+                           skip_existing: bool = True,
+                           min_age_window_sec: int = 120) -> str | None:
         """轮询等待 ChatGPT 验证码邮件。
         after_time: 只读取该时间戳之后收到的邮件，避免读到旧验证码。
         skip_existing: 先记录当前收件箱所有邮件 ID，只读取新到达的邮件。
+        min_age_window_sec: 时间过滤窗口——只接受「轮询开始前 min_age_window_sec 秒内」到达的邮件。
         """
         start_time = time.time()
         seen_ids: set[str] = set()
@@ -192,9 +194,9 @@ class EmailService:
             except Exception as e:
                 add_log("warning", f"读取旧邮件列表异常: {e}", {"email": email})
 
-        # 时间过滤：只读取最近 120 秒内收到的邮件
+        # 时间过滤：只读取最近 min_age_window_sec 秒内收到的邮件（原硬编码 120）
         from datetime import datetime
-        min_time = start_time - 120
+        min_time = start_time - max(1, int(min_age_window_sec))
         while time.time() - start_time < timeout_sec:
             try:
                 emails = await self.get_email_list(email, password, client_id, refresh_token)

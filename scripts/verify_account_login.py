@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-"""用账号密码直接登录 OpenAI，验证自动注册的账号是否可用。
+"""用 OpenAI 账号密码登录验证/刷新账号 token（支持二次验证码 + 断点续跑）。
 
 流程:
-    1. 导航 OAuth authorize (PKCE) 登录页（邮箱自动预填）
-    2. 用数据库里的 password 填密码并提交
-    3. 判断结果：
-       - 密码正确 → 登录成功 → 账号可用（顺带捕获 code 换取 token 作附加参考）
-       - 密码错误 → 登录失败，说明该密码不是 OpenAI 账号密码
+    1. OAuth authorize (PKCE) → 识别登录页
+    2. 填 OpenAI 密码提交
+    3. 若 OpenAI 要求二次验证码 → 用微软邮箱收码输入
+    4. 捕获 code → 换 token 三件套 → 回写数据库
 
-主结论 = 账号密码能否登录（= 账号是否可用）；token 仅作附加参考。
+用法:
+    python scripts/verify_account_login.py --email xxx@outlook.com   # 单个
+    python scripts/verify_account_login.py --all                     # 批量（断点续跑）
 """
 from __future__ import annotations
 
@@ -19,6 +20,7 @@ import json
 import secrets
 import sqlite3
 import sys
+import time
 import uuid
 from pathlib import Path
 from urllib.parse import urlencode
@@ -35,6 +37,8 @@ from services.browser_register import (
     OAUTH_REDIRECT_URI,
     _generate_pkce,
 )
+
+RESULT_FILE = ROOT / "data" / "refresh_results.jsonl"
 
 
 def _pick_account(email: str | None) -> dict:
@@ -54,10 +58,7 @@ def _pick_account(email: str | None) -> dict:
     if not row:
         print("[错误] 未找到可用账号")
         sys.exit(1)
-    d = dict(row)
-    # 优先用 OpenAI 账号密码；无则回退数据库 password（微软邮箱密码）
-    d["login_password"] = d.get("openai_password") or d.get("password") or ""
-    return d
+    return dict(row)
 
 
 def _build_authorize_url(email: str, verifier: str, challenge: str) -> str:
@@ -90,9 +91,29 @@ def _jwt_peek(token: str) -> str:
         return "无法解码"
 
 
-async def run(email: str, password: str, proxy_url: str | None, headful: bool) -> int:
+def _result_success(email: str) -> bool:
+    """该账号是否已在结果文件中标记为成功（成功才跳过，失败会重试）"""
+    if not RESULT_FILE.exists():
+        return False
+    for line in RESULT_FILE.read_text(encoding="utf-8").splitlines():
+        try:
+            d = json.loads(line)
+            if d.get("email") == email and d.get("success"):
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _save_result(email: str, success: bool, exit_code: int, reason: str = ""):
+    with open(RESULT_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"email": email, "success": success, "exit": exit_code, "reason": reason}, ensure_ascii=False) + "\n")
+
+
+async def run(email: str, openai_pw: str, ms_password: str, ms_client_id: str,
+              ms_refresh_token: str, proxy_url: str | None, headful: bool) -> int:
     reg = BrowserRegister({
-        "otp_wait_timeout_sec": 300,
+        "otp_wait_timeout_sec": 180,
         "otp_poll_interval_sec": 5,
         "proxy_url": proxy_url,
         "use_proxy": bool(proxy_url),
@@ -100,7 +121,6 @@ async def run(email: str, password: str, proxy_url: str | None, headful: bool) -
 
     verifier, challenge = _generate_pkce()
     authorize_url = _build_authorize_url(email, verifier, challenge)
-    print("[1/4] 构造 OAuth authorize 登录 URL (PKCE)")
 
     from camoufox.async_api import AsyncCamoufox
     from camoufox import DefaultAddons
@@ -123,89 +143,117 @@ async def run(email: str, password: str, proxy_url: str | None, headful: bool) -
             )
     context = await browser.new_context(**context_kwargs)
     page = await context.new_page()
-    print(f"[2/4] 导航登录页: {authorize_url[:80]}...")
 
     try:
-        await page.goto(authorize_url, wait_until="networkidle", timeout=60000)
-        await asyncio.sleep(4)
+        try:
+            await page.goto(authorize_url, wait_until="commit", timeout=45000)
+        except Exception:
+            await page.goto(authorize_url, wait_until="commit", timeout=45000)
+        await asyncio.sleep(6)
 
-        # 密码输入框（诊断确认页面是 log-in/password，邮箱已预填）
-        print("[3/4] 填写密码并提交...")
+        # 密码输入框（邮箱已预填）
         pwd_input = page.locator('input[name="current-password"]').first
         try:
-            await pwd_input.wait_for(state="visible", timeout=15000)
+            await pwd_input.wait_for(state="visible", timeout=20000)
         except Exception:
-            await page.screenshot(path=str(ROOT / "verify_pwd_debug.png"))
-            body = await page.evaluate("() => document.body ? document.body.innerText.slice(0,300) : ''")
-            print(f"   [失败] 未找到密码输入框, URL: {page.url[:80]}")
-            print(f"   页面文字: {body[:200]}")
+            body = await page.evaluate("() => document.body ? document.body.innerText.slice(0,200) : ''") or ""
+            print(f"   [跳过] 未到密码页, URL: {page.url[:80]}, 页面: {body[:100]}")
             return 1
 
         await pwd_input.click()
         await pwd_input.fill("")
-        await page.keyboard.type(password, delay=50)
+        await page.keyboard.type(openai_pw, delay=40)
         await asyncio.sleep(0.5)
-        await page.locator('button[type="submit"]').first.click(timeout=10000)
-
-        # ── 判断登录结果 ──
-        print("[4/4] 等待登录结果...")
-        await asyncio.sleep(6)
-
-        # 情况1: 登录成功 → 跳转携带 code
-        code = await reg._wait_for_oauth_code(page, timeout=20)
-        if code:
-            print("✅ 密码正确，登录成功！")
-            tokens = await reg._exchange_code(code, verifier, proxy_url)
-            if tokens and tokens.get("access_token"):
-                at = tokens.get("access_token", "")
-                rt = tokens.get("refresh_token", "")
-                it = tokens.get("id_token", "")
-                print("\n  附加抓取到 token 三件套:")
-                print(f"    access_token : {at[:36]}... (len={len(at)}, {_jwt_peek(at)})")
-                print(f"    refresh_token: {rt[:36]}... (len={len(rt)})" + ("  ← ✅" if rt else "  ← 无"))
-                print(f"    id_token     : {it[:36]}... (len={len(it)})")
-                # 回写数据库（刷新长期 token）
-                try:
-                    conn = sqlite3.connect(str(ROOT / "data" / "register.db"))
-                    conn.execute(
-                        "UPDATE accounts SET access_token=?, openai_refresh_token=?, id_token=?, status='success' WHERE email=?",
-                        (at, rt, it, email),
-                    )
-                    conn.commit()
-                    conn.close()
-                    print("   ✅ 已回写 token 到数据库 (可长期自动续期)")
-                except Exception as e:
-                    print(f"   [警告] 回写数据库失败: {e}")
-            print("\n🔑 结论: 该账号密码可登录 OpenAI，账号可用。")
-            return 0
-
-        # 情况2: 密码错误或其他
-        body = ""
+        # 记录密码提交时刻：后续只接收此之后到达的新验证码邮件，避免读到已过期的旧码
+        from datetime import datetime, timezone
+        submit_baseline = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
         try:
-            body = await page.evaluate("() => document.body ? document.body.innerText : ''") or ""
+            await page.locator('button[type="submit"]').first.click(timeout=10000)
         except Exception:
-            pass
-        cur = page.url
-        low = body.lower()
-        if any(w in low for w in ["incorrect", "wrong password", "invalid password", "password incorrect"]):
-            print("❌ 密码错误，登录失败。")
-            print("\n💡 说明: 数据库存的 password 是【微软邮箱密码】，不是 OpenAI 账号密码。")
-            print("   该 OpenAI 账号显示密码登录页，但系统未保存其真实密码（注册用邮箱+验证码创建）。")
-            print("   因此「账号密码登录 OpenAI」无法用这个密码验证。")
-            return 1
-        if "two-step" in low or "2fa" in low or "authentication" in low and "code" in low:
-            print("⚠️ 密码通过，但进入两步验证（MFA）页面，未走验证码通道。")
-            print("   说明该账号密码有效，账号可用（需额外 2FA）。")
-            return 2
+            await page.keyboard.press("Enter")
 
-        print(f"❓ 登录结果不明。URL: {cur[:100]}")
-        print(f"   页面文字: {body[:200]}")
-        await page.screenshot(path=str(ROOT / "verify_result_debug.png"))
-        return 1
+        # 等待登录结果 / 二次验证码 / code
+        code = ""
+        reason = ""
+        for attempt in range(2):
+            await asyncio.sleep(6)
+            code = await reg._wait_for_oauth_code(page, timeout=15)
+            if code:
+                break
+
+            body = await page.evaluate("() => document.body ? document.body.innerText : ''") or ""
+            low = body.lower()
+            cur = page.url
+
+            if "incorrect" in low or "wrong password" in low or "invalid password" in low:
+                reason = "密码错误"
+                print("   ❌ 密码错误")
+                return 1
+            if "account doesn't exist" in low or "not found" in low:
+                reason = "账号不存在"
+                print("   ❌ 账号不存在")
+                return 1
+
+            # 二次验证码（email-verification / 2FA）
+            vcode_input = page.locator('input[name="code"], input[autocomplete="one-time-code"], input[inputmode="numeric"]').first
+            if await vcode_input.count() > 0 and await vcode_input.is_visible():
+                print("   [2FA] OpenAI 要求二次验证码，用微软邮箱接收新验证码...")
+                from services.graph_email_service import graph_email_service
+                vcode = await graph_email_service.wait_for_new_otp(
+                    email, ms_client_id, ms_refresh_token, submit_baseline,
+                    timeout_sec=600, poll_interval=10,
+                )
+                if not vcode:
+                    reason = "二次验证码未收到"
+                    print("   ❌ 二次验证码未收到")
+                    return 1
+                await vcode_input.click()
+                await vcode_input.fill("")
+                await page.keyboard.type(vcode, delay=50)
+                await asyncio.sleep(0.5)
+                try:
+                    await page.locator('button[type="submit"]').first.click(timeout=10000)
+                except Exception:
+                    await page.keyboard.press("Enter")
+                continue
+
+            # 已通过但停在 MFA 选择页
+            if "two-step" in low or "authenticator" in low:
+                reason = "需2FA应用验证"
+                print("   ⚠️ 需要 2FA 应用验证，跳过")
+                return 2
+
+            reason = f"未知页面: {cur[:80]}"
+            break
+
+        if not code:
+            print(f"   ❌ {reason}")
+            return 1
+
+        # 换 token 三件套并回写
+        tokens = await reg._exchange_code(code, verifier, proxy_url)
+        if not tokens or not tokens.get("access_token"):
+            print("   ❌ code 换 token 失败")
+            return 1
+
+        at = tokens.get("access_token", "")
+        rt = tokens.get("refresh_token", "")
+        it = tokens.get("id_token", "")
+        print(f"   ✅ 登录成功! access_token len={len(at)} ({_jwt_peek(at)}), refresh_token {'✅' if rt else '❌'}")
+        try:
+            conn = sqlite3.connect(str(ROOT / "data" / "register.db"))
+            conn.execute(
+                "UPDATE accounts SET access_token=?, openai_refresh_token=?, id_token=?, status='success' WHERE email=?",
+                (at, rt, it, email),
+            )
+            conn.commit()
+            conn.close()
+            print("   ✅ 已回写 token 到数据库")
+        except Exception as e:
+            print(f"   [警告] 回写失败: {e}")
+        return 0
     except Exception as e:
-        import traceback
-        traceback.print_exc()
-        print(f"[异常] {e}")
+        print(f"   [异常] {e}")
         return 1
     finally:
         try:
@@ -219,11 +267,11 @@ async def run(email: str, password: str, proxy_url: str | None, headful: bool) -
 
 
 def main():
-    parser = argparse.ArgumentParser(description="用账号密码登录 OpenAI 验证/刷新账号 token")
-    parser.add_argument("--email", default="", help="指定账号邮箱（默认取第一个标准 JWT 账号）")
-    parser.add_argument("--all", action="store_true", help="批量刷新所有有 OpenAI 密码的账号（逐个登录，耗时较长）")
-    parser.add_argument("--proxy", default="", help="代理 URL（默认直连）")
-    parser.add_argument("--headful", action="store_true", help="显示浏览器窗口（调试用）")
+    parser = argparse.ArgumentParser(description="用 OpenAI 密码登录验证/刷新账号 token")
+    parser.add_argument("--email", default="", help="指定账号邮箱")
+    parser.add_argument("--all", action="store_true", help="批量刷新所有有 OpenAI 密码的账号（断点续跑）")
+    parser.add_argument("--proxy", default="", help="代理 URL")
+    parser.add_argument("--headful", action="store_true", help="显示浏览器窗口")
     args = parser.parse_args()
 
     proxy = args.proxy or None
@@ -231,32 +279,41 @@ def main():
     if args.all:
         conn = sqlite3.connect(str(ROOT / "data" / "register.db"))
         rows = conn.execute(
-            "SELECT email, openai_password, client_id, refresh_token FROM accounts "
+            "SELECT email, password, openai_password, client_id, refresh_token FROM accounts "
             "WHERE openai_password IS NOT NULL AND openai_password != '' ORDER BY id"
         ).fetchall()
         conn.close()
-        print(f"待批量刷新: {len(rows)} 个有 OpenAI 密码的账号\n")
-        ok = fail = 0
-        for i, (email, pw, cid, rt) in enumerate(rows, 1):
-            print(f"=== [{i}/{len(rows)}] {email} ===")
-            code = asyncio.run(run(email, pw, proxy, args.headful))
-            if code == 0:
+        print(f"待批量刷新: {len(rows)} 个有 OpenAI 密码的账号", flush=True)
+        print(f"结果写入: {RESULT_FILE}（已处理的将跳过，断点续跑）\n", flush=True)
+        ok = fail = skip = 0
+        for i, (email, ms_pw, opw, cid, rt) in enumerate(rows, 1):
+            if _result_success(email):
+                skip += 1
+                continue
+            print(f"=== [{i}/{len(rows)}] {email} ===", flush=True)
+            code = asyncio.run(run(email, opw, ms_pw, cid, rt, proxy, args.headful))
+            is_ok = code == 0
+            if is_ok:
                 ok += 1
             else:
                 fail += 1
-            print(f"   结果: {'✅' if code == 0 else '❌'}\n")
-        print(f"批量完成: 成功 {ok}, 失败 {fail}")
+            _save_result(email, is_ok, code)
+            print(f"   结果: {'✅ 可用' if is_ok else '❌ 不可用'}\n", flush=True)
+            time.sleep(2)
+        print(f"\n批量完成: 可用 {ok}, 不可用 {fail}, 跳过已处理 {skip}")
         sys.exit(0)
 
     acc = _pick_account(args.email or None)
-    pw = acc["login_password"]
+    opw = acc.get("openai_password") or ""
+    if not opw:
+        print(f"[错误] 账号 {acc['email']} 没有 OpenAI 密码，无法用密码登录验证")
+        sys.exit(1)
     print(f"使用账号: {acc['email']}")
-    print(f"密码: {pw[:4]}*** (长度 {len(pw)}, {'OpenAI密码' if acc.get('openai_password') else '微软邮箱密码'})")
     print(f"代理: {proxy or '直连'}")
 
     exit_code = asyncio.run(run(
-        acc["email"], pw,
-        proxy, args.headful,
+        acc["email"], opw, acc.get("password") or "", acc.get("client_id") or "",
+        acc.get("refresh_token") or "", proxy, args.headful,
     ))
     sys.exit(exit_code)
 

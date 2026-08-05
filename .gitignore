@@ -45,3 +45,7 @@ Thumbs.db
 .windsurf/
 .mcp.json
 opencode.json
+
+# coverage 产物
+.coverage
+htmlcov/

@@ -84,30 +84,33 @@ echo       Virtual env ready
 rem ---------- 3/6 Install dependencies ----------
 echo [3/6] Installing dependencies...
 "%VENV_PY%" -m pip install --quiet --upgrade pip 2>nul
-"%VENV_PY%" -m pip install --quiet fastapi uvicorn httpx loguru psutil 2>nul
-if errorlevel 1 (
-    echo [WARN] Partial dependency install failed, trying full install...
-    "%VENV_PY%" -m pip install fastapi uvicorn httpx loguru psutil
+if exist requirements.txt (
+    echo       Installing from requirements.txt...
+    "%VENV_PY%" -m pip install --quiet -r requirements.txt 2>nul
+    if errorlevel 1 (
+        echo [WARN] requirements install failed, retrying verbose...
+        "%VENV_PY%" -m pip install -r requirements.txt
+        if errorlevel 1 (
+            echo [ERROR] Dependency install failed
+            goto :failed
+        )
+    )
+) else (
+    echo [WARN] requirements.txt not found, installing core deps manually...
+    "%VENV_PY%" -m pip install fastapi uvicorn httpx loguru psutil requests curl_cffi imapclient
     if errorlevel 1 (
         echo [ERROR] Dependency install failed
         goto :failed
     )
 )
 
-rem Install camoufox (needed by CF solver)
-echo       Installing camoufox (CF solver)...
-"%VENV_PY%" -m pip install --quiet "camoufox[fetch]" 2>nul
+rem Check camoufox browser data downloaded (needed by CF solver / browser fallback)
+"%VENV_PY%" -c "import os; d1=os.path.join(os.path.expanduser('~'),'.camoufox'); d2=os.path.join(os.path.expanduser('~'),'.cache','camoufox'); exit(0 if (os.path.isdir(d1) and os.listdir(d1)) or (os.path.isdir(d2) and os.listdir(d2)) else 1)" 2>nul
 if errorlevel 1 (
-    echo [WARN] camoufox install failed, CF solver may be unavailable
-) else (
-    rem Check camoufox data downloaded
-    "%VENV_PY%" -c "import os; d1=os.path.join(os.path.expanduser('~'),'.camoufox'); d2=os.path.join(os.path.expanduser('~'),'.cache','camoufox'); exit(0 if (os.path.isdir(d1) and os.listdir(d1)) or (os.path.isdir(d2) and os.listdir(d2)) else 1)" 2>nul
+    echo       Downloading camoufox browser data...
+    "%VENV_PY%" -m camoufox fetch 2>nul
     if errorlevel 1 (
-        echo       Downloading camoufox browser data...
-        "%VENV_PY%" -m camoufox fetch 2>nul
-        if errorlevel 1 (
-            echo [WARN] camoufox data download failed
-        )
+        echo [WARN] camoufox data download failed
     )
 )
 echo       Dependencies installed

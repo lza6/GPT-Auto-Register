@@ -34,10 +34,11 @@ from curl_cffi import requests as cffi
 # 复用取码/换token/导入
 import revive_import as R
 
-# 引入 chatgpt2api 的 sentinel 构造器
-_C2API_DIR = r"C:\Users\Administrator.DESKTOP-EGNE9ND\Desktop\私单\chatgpt2api"
-sys.path.insert(0, _C2API_DIR)
-from utils.sentinel import build_sentinel_token  # noqa: E402
+# 引入本项目移植的 sentinel 构造器（services/sentinel.py，来源 chatgpt2api，
+# 避免对 chatgpt2api 目录的绝对路径硬编码依赖）
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, _PROJECT_ROOT)
+from services.sentinel import build_sentinel_token  # noqa: E402
 
 AUTH_BASE = "https://auth.openai.com"
 # 每个端点用各自正确的 sentinel flow(已抓包确认)

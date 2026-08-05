@@ -1,5 +1,6 @@
 {
   "auth_key": "请修改为你的管理密钥",
+  "auth_enforced": false,
   "port": 23457,
   "proxy_file": "proxies.txt",
   "email_source_url": "",
@@ -8,13 +9,19 @@
   "register_interval_sec": 10,
   "otp_wait_timeout_sec": 600,
   "otp_poll_interval_sec": 5,
+  "otp_min_age_window_sec": 120,
+  "otp_fallback_after_sec": 40,
+  "otp_backfill_window_min": 15,
   "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
   "token_output_file": "已经获取到的token.txt",
   "email_output_file": "获取到的所有邮箱.txt",
   "batch_size": 100,
   "use_proxy": true,
   "use_oauth_pkce": true,
+  "use_browser": true,
+  "protocol_first": true,
   "proxy_url": "http://127.0.0.1:10808",
   "chatgpt2api_url": "http://127.0.0.1:23456",
-  "chatgpt2api_admin_key": ""
+  "chatgpt2api_admin_key": "",
+  "log_retention_days": 30
 }

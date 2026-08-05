@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,23 @@ def get_conn() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA busy_timeout=5000")
     return conn
+
+
+@contextmanager
+def db_session() -> sqlite3.Connection:
+    """数据库会话上下文管理器：自动 commit / rollback / close。
+
+    收敛手写样板（get_conn + with conn + close），确保异常时回滚且不泄漏连接。
+    """
+    conn = get_conn()
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def init_db() -> None:
@@ -97,28 +115,44 @@ def init_db() -> None:
 
 
 def add_log(level: str, message: str, data: Any = None) -> None:
-    conn = get_conn()
-    with conn:
+    with db_session() as conn:
         conn.execute(
             "INSERT INTO logs (level, message, data, created_at) VALUES (?, ?, ?, ?)",
             (level, message, json.dumps(data, ensure_ascii=False) if data else None, time.time()),
         )
-    conn.close()
 
 
 def get_logs(limit: int = 100, offset: int = 0) -> list[dict]:
-    conn = get_conn()
-    rows = conn.execute(
-        "SELECT * FROM logs ORDER BY id DESC LIMIT ? OFFSET ?", (limit, offset)
-    ).fetchall()
-    conn.close()
+    with db_session() as conn:
+        rows = conn.execute(
+            "SELECT * FROM logs ORDER BY id DESC LIMIT ? OFFSET ?", (limit, offset)
+        ).fetchall()
     return [dict(r) for r in rows]
 
 
+def get_logs_after(after_id: int, limit: int = 1000) -> list[dict]:
+    """返回 id > after_id 的日志（增量拉取，前端轮询降载用）。"""
+    with db_session() as conn:
+        rows = conn.execute(
+            "SELECT * FROM logs WHERE id > ? ORDER BY id ASC LIMIT ?", (after_id, limit)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def purge_old_logs(retention_days: int = 30) -> int:
+    """删除 logs 表超过保留期（retention_days 天）的记录，返回删除条数。
+
+    防止长期运行日志无限增长。启动时与（可选的）定时任务调用。
+    """
+    cutoff = time.time() - max(1, int(retention_days)) * 86400
+    with db_session() as conn:
+        cur = conn.execute("DELETE FROM logs WHERE created_at < ?", (cutoff,))
+    return cur.rowcount
+
+
 def insert_email(email: str, password: str, client_id: str, refresh_token: str) -> bool:
-    conn = get_conn()
     try:
-        with conn:
+        with db_session() as conn:
             conn.execute(
                 "INSERT OR IGNORE INTO emails (email, password, client_id, refresh_token) VALUES (?, ?, ?, ?)",
                 (email, password, client_id, refresh_token),
@@ -126,28 +160,23 @@ def insert_email(email: str, password: str, client_id: str, refresh_token: str) 
         return True
     except Exception:
         return False
-    finally:
-        conn.close()
 
 
 def get_pending_emails(limit: int = 0) -> list[dict]:
-    conn = get_conn()
     sql = "SELECT * FROM emails WHERE status = 'pending' ORDER BY id ASC"
     if limit > 0:
         sql += f" LIMIT {limit}"
-    rows = conn.execute(sql).fetchall()
-    conn.close()
+    with db_session() as conn:
+        rows = conn.execute(sql).fetchall()
     return [dict(r) for r in rows]
 
 
 def mark_email_status(email: str, status: str) -> None:
-    conn = get_conn()
-    with conn:
+    with db_session() as conn:
         conn.execute(
             "UPDATE emails SET status = ?, used_at = ? WHERE email = ?",
             (status, time.time() if status != 'pending' else None, email),
         )
-    conn.close()
 
 
 def insert_account(email: str, password: str, client_id: str, refresh_token: str,
@@ -155,8 +184,7 @@ def insert_account(email: str, password: str, client_id: str, refresh_token: str
                    proxy: str = "", status: str = "pending", error: str = "",
                    openai_refresh_token: str = "", id_token: str = "",
                    openai_password: str = "") -> None:
-    conn = get_conn()
-    with conn:
+    with db_session() as conn:
         conn.execute(
             """INSERT OR REPLACE INTO accounts
                (email, password, client_id, refresh_token, access_token, openai_refresh_token, id_token, openai_password, name, birthdate, proxy, status, error, registered_at)
@@ -165,47 +193,49 @@ def insert_account(email: str, password: str, client_id: str, refresh_token: str
              openai_password, name, birthdate, proxy, status, error,
              time.time() if status == 'success' else None),
         )
-    conn.close()
 
 
-def get_accounts(status: str = "", limit: int = 0, offset: int = 0) -> list[dict]:
-    conn = get_conn()
+def get_accounts(status: str = "", limit: int = 0, offset: int = 0, search: str = "") -> list[dict]:
     sql = "SELECT * FROM accounts"
     params: list = []
+    conds: list[str] = []
     if status:
-        sql += " WHERE status = ?"
+        conds.append("status = ?")
         params.append(status)
+    if search:
+        conds.append("email LIKE ?")
+        params.append(f"%{search.strip()}%")
+    if conds:
+        sql += " WHERE " + " AND ".join(conds)
     sql += " ORDER BY id DESC"
     if limit > 0:
         sql += " LIMIT ? OFFSET ?"
         params.extend([limit, offset])
-    rows = conn.execute(sql, params).fetchall()
-    conn.close()
+    with db_session() as conn:
+        rows = conn.execute(sql, params).fetchall()
     return [dict(r) for r in rows]
 
 
 def count_accounts(status: str = "") -> int:
-    conn = get_conn()
-    if status:
-        row = conn.execute("SELECT COUNT(*) as c FROM accounts WHERE status = ?", (status,)).fetchone()
-    else:
-        row = conn.execute("SELECT COUNT(*) as c FROM accounts").fetchone()
-    conn.close()
+    with db_session() as conn:
+        if status:
+            row = conn.execute("SELECT COUNT(*) as c FROM accounts WHERE status = ?", (status,)).fetchone()
+        else:
+            row = conn.execute("SELECT COUNT(*) as c FROM accounts").fetchone()
     return row["c"] if row else 0
 
 
 def count_emails(status: str = "") -> int:
-    conn = get_conn()
-    if status:
-        row = conn.execute("SELECT COUNT(*) as c FROM emails WHERE status = ?", (status,)).fetchone()
-    else:
-        row = conn.execute("SELECT COUNT(*) as c FROM emails").fetchone()
-    conn.close()
+    with db_session() as conn:
+        if status:
+            row = conn.execute("SELECT COUNT(*) as c FROM emails WHERE status = ?", (status,)).fetchone()
+        else:
+            row = conn.execute("SELECT COUNT(*) as c FROM emails").fetchone()
     return row["c"] if row else 0
 
 
 def get_stats() -> dict:
-    return {
+    stats = {
         "emails_total": count_emails(),
         "emails_pending": count_emails("pending"),
         "emails_used": count_emails("used"),
@@ -216,20 +246,28 @@ def get_stats() -> dict:
         "accounts_pending": count_accounts("pending"),
         "accounts_registering": count_accounts("registering"),
     }
+    # 最近一次批量任务的失败原因分类分布（run_batch 写入 tasks.result.failure_types）
+    stats["last_task_failure_types"] = {}
+    task = get_latest_task()
+    if task and task.get("result"):
+        try:
+            data = json.loads(task["result"])
+            ft = data.get("failure_types") or {}
+            stats["last_task_failure_types"] = ft if isinstance(ft, dict) else {}
+        except Exception:
+            pass
+    return stats
 
 
 def get_setting(key: str, default: str = "") -> str:
-    conn = get_conn()
-    row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
-    conn.close()
+    with db_session() as conn:
+        row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
     return row["value"] if row else default
 
 
 def set_setting(key: str, value: str) -> None:
-    conn = get_conn()
-    with conn:
+    with db_session() as conn:
         conn.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, value))
-    conn.close()
 
 
 # ────────────────────────────────
@@ -240,27 +278,23 @@ def update_task_progress(task_id: int, completed: int = 0, failed: int = 0,
                          skipped: int = 0, status: str = "running",
                          result: str = "") -> None:
     """更新任务进度（调用方传入累计值，整体覆盖）。"""
-    conn = get_conn()
-    with conn:
+    with db_session() as conn:
         conn.execute(
             """UPDATE tasks SET completed = ?, failed = ?, skipped = ?, status = ?,
                result = ?, updated_at = ? WHERE id = ?""",
             (completed, failed, skipped, status, result, time.time(), task_id),
         )
-    conn.close()
 
 
 def get_task(task_id: int) -> dict | None:
-    conn = get_conn()
-    row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
-    conn.close()
+    with db_session() as conn:
+        row = conn.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
     return dict(row) if row else None
 
 
 def get_latest_task() -> dict | None:
-    conn = get_conn()
-    row = conn.execute("SELECT * FROM tasks ORDER BY id DESC LIMIT 1").fetchone()
-    conn.close()
+    with db_session() as conn:
+        row = conn.execute("SELECT * FROM tasks ORDER BY id DESC LIMIT 1").fetchone()
     return dict(row) if row else None
 
 
@@ -269,13 +303,11 @@ def reset_stale_tasks() -> int:
 
     emails 表按 status=pending 驱动续跑，因此已成功的账号不会重复注册。
     """
-    conn = get_conn()
-    with conn:
+    with db_session() as conn:
         cur = conn.execute(
             "UPDATE tasks SET status = 'interrupted', updated_at = ? WHERE status = 'running'",
             (time.time(),),
         )
-    conn.close()
     return cur.rowcount
 
 

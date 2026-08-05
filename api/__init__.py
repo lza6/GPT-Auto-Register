@@ -36,6 +36,16 @@ def _resolve_auth_key() -> str:
     return "" if key in DEFAULT_AUTH_PLACEHOLDERS else key
 
 
+def _resolve_auth_enforced() -> bool:
+    """读取 auth_enforced（布尔或字符串 'true'/'false'，兼容 settings API 存字符串）。"""
+    v = load_config().get("auth_enforced", False)
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on")
+    return False
+
+
 class AuthKeyMiddleware:
     """极简鉴权：``/api/*`` 请求必须携带 ``X-Auth-Key`` 且等于 config.auth_key。
 
@@ -70,7 +80,7 @@ class AuthKeyMiddleware:
 
 def create_app() -> FastAPI:
     config = load_config()
-    app = FastAPI(title="GPT 自动注册", version="1.1.0")
+    app = FastAPI(title="GPT 自动注册", version="2.0.0")
 
     # CORS：前端由本站同源静态服务提供，仅放行本地调试源，关闭凭据通配
     app.add_middleware(
@@ -87,6 +97,14 @@ def create_app() -> FastAPI:
     )
 
     auth_key = _resolve_auth_key()
+    auth_enforced = _resolve_auth_enforced()
+    if auth_enforced and not auth_key:
+        # fail-fast：管理员声明强制鉴权但密钥未配置/为占位符 → 拒绝启动
+        # （避免"以为有鉴权、实际裸奔"的假安全状态）
+        raise RuntimeError(
+            "config.auth_enforced=true 但 auth_key 未配置或为占位符，拒绝启动以保证安全。"
+            "请先在 config.json 设置真实 auth_key。"
+        )
     app.add_middleware(AuthKeyMiddleware, auth_key=auth_key)
 
     @app.get("/api/healthz")
@@ -103,6 +121,7 @@ def create_app() -> FastAPI:
             "status": "ok" if db_ok else "degraded",
             "db": "ok" if db_ok else "error",
             "auth": "enabled" if auth_key else "disabled",
+            "auth_enforced": auth_enforced,
         }
 
     app.include_router(register_router.router, prefix="/api/register", tags=["register"])

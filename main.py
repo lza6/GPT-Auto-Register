@@ -51,6 +51,31 @@ def load_config() -> dict:
     return {}
 
 
+def _validate_config(config: dict) -> None:
+    """启动时校验关键配置，缺失/占位符打印醒目警告（不阻断启动）。"""
+    auth_key = str(config.get("auth_key") or "").strip()
+    if not auth_key or auth_key in ("请修改为你的管理密钥", "change-me"):
+        print("[WARN] config.json 的 auth_key 未设置（占位符），/api 接口将不鉴权。生产环境请务必设置真实密钥。")
+        print("      提示：设置 config.auth_enforced=true 后，占位符密钥将导致启动失败（fail-fast）。")
+
+
+def _purge_old_logs() -> None:
+    """启动时清理超过 log_retention_days 的旧日志（防日志表无限增长）。"""
+    try:
+        config = load_config()
+        days = int(config.get("log_retention_days", 30))
+        from services.db import purge_old_logs
+        n = purge_old_logs(days)
+        if n:
+            print(f"[startup] 已清理 {n} 条过期日志（保留 {days} 天）")
+    except Exception:
+        pass
+
+
+_validate_config(load_config())
+_purge_old_logs()
+
+
 if __name__ == "__main__":
     config = load_config()
     port = int(os.getenv("GPT_REGISTER_PORT", str(config.get("port", 23457))))

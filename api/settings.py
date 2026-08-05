@@ -21,6 +21,25 @@ class SettingsUpdateRequest(BaseModel):
 # 命中这些关键词的配置项视为敏感（密钥/口令），对外脱敏展示
 SENSITIVE_KEY_HINTS = ("key", "password", "auth", "secret")
 
+# 允许通过设置接口修改的配置白名单。
+# 白名单外（尤其 auth_key）禁止写入，防止配置注入 / 覆盖鉴权密钥。
+ALLOWED_SETTINGS_KEYS = {
+    "email_source_url",
+    "register_interval_sec",
+    "otp_wait_timeout_sec",
+    "otp_poll_interval_sec",
+    "batch_size",
+    "chatgpt2api_url",
+    "chatgpt2api_admin_key",
+    "protocol_first",
+    "use_browser",
+    "use_oauth_pkce",
+    "register_concurrency",
+    "email_api_base",
+    "user_agent",
+    "auth_enforced",
+}
+
 
 def _mask_sensitive(config: dict) -> dict:
     """掩码敏感配置值，避免 auth_key / 管理密钥明文暴露到前端。"""
@@ -43,12 +62,15 @@ async def get_all_settings() -> dict:
 
 @router.post("/")
 async def update_setting(req: SettingsUpdateRequest) -> dict:
-    set_setting(req.key, req.value)
+    key = req.key.strip()
+    if key not in ALLOWED_SETTINGS_KEYS:
+        raise HTTPException(400, f"不允许修改的配置项: {key}")
+    set_setting(key, req.value)
     # 同步更新 config.json
     config = {}
     if CONFIG_PATH.exists():
         config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    config[req.key] = req.value
+    config[key] = req.value
     CONFIG_PATH.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
     return {"success": True}
 

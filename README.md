@@ -10,13 +10,17 @@
 |------|------|
 | 🌐 **Web 控制台** | 一键管理界面，访问 `http://localhost:23457` |
 | 📧 **邮箱池管理** | 从 91kami 网址批量导入；支持手动批量添加 `邮箱----密码----client_id----refresh_token`；逐条删除 / 清空 |
-| 🤖 **注册引擎** | camoufox 浏览器自动化，邮箱 + OTP 验证码注册，自动填写姓名/年龄/生日，**自动设置 OpenAI 账号密码**，获取 access_token |
+| 🤖 **注册引擎** | **协议优先（curl_cffi + sentinel）→ 浏览器兜底（camoufox）**，自动设置 OpenAI 账号密码，获取 access_token + refresh_token 三件套（长期续期） |
+| ⚡ **并发注册** | `register_concurrency` 并发批量，充分利用多核/多代理；暂停/继续/停止语义完整 |
 | 🛡️ **CF Solver** | 独立服务（端口 8001），Cloudflare 人机验证兜底 |
 | 🛡️ **代理池** | 支持 kookeey 动态住宅代理（每账号独立 IP）+ 通用 HTTP 代理轮询，前端可编辑保存 |
 | 📤 **一键导出账号密码** | 导出 `邮箱----OpenAI密码` 清单（按邮箱去重），也可导出 chatgpt2api 兼容格式 JSON |
-| 🗑️ **一键清空库** | 导出后开始新一轮，清空注册记录/邮箱池/任务（保留日志），需输入 `clear` 确认 |
-| 📝 **运行日志** | 实时查看注册过程日志，可清空 |
-| ⚙️ **系统设置** | 邮箱源 URL、注册间隔、OTP 超时、批量数量、chatgpt2api 地址等 |
+| 🔍 **搜索/筛选/分页** | 注册记录、邮箱池支持邮箱搜索、状态筛选、分页浏览 |
+| 🌓 **主题切换** | 深色/浅色一键切换（跟随系统），移动端自适应布局 |
+| 🗑️ **一键清空库** | 需输入 `clear` 确认，**清空前自动备份**到 `data/backups/`（保留最近 7 份） |
+| 📊 **失败原因分类** | 批量任务失败按 风控/验证码超时/网络/服务器5xx/未知 分类统计，前端可量化瓶颈 |
+| 📝 **运行日志** | 实时增量拉取（轮询降载），可清空，超过保留期自动清理 |
+| ⚙️ **系统设置** | 邮箱源 URL、注册间隔、OTP 超时/轮询间隔、并发数、批量数量、邮件 API Base、UA、chatgpt2api 等 |
 
 ---
 
@@ -74,25 +78,37 @@ GPT-Auto-Register/
 ├── 启动.bat                 # 一键启动（Web 控制台 + CF Solver）
 ├── 停止.bat                 # 一键停止（按端口精准清理）
 ├── main.py                  # 服务入口
+├── requirements.txt         # 依赖清单（唯一来源，启动.bat 据此安装）
 ├── config.json              # 运行配置（勿提交，含密钥）
 ├── api/                     # FastAPI 路由
 │   ├── register.py          # 注册任务 / 导出 / 清空 / chatgpt2api 对接
-│   ├── emails.py            # 邮箱池（手动添加 / 删除 / 清空）
+│   ├── emails.py            # 邮箱池（手动添加 / 删除 / 清空 / 搜索分页）
 │   ├── proxies.py           # 代理池（读写 proxies.txt）
-│   ├── settings.py          # 系统设置
-│   ├── stats.py             # 统计
-│   └── logs.py              # 日志
+│   ├── settings.py          # 系统设置（白名单校验）
+│   ├── stats.py             # 统计（含失败分类）
+│   └── logs.py              # 日志（增量拉取 / 保留清理）
 ├── services/                # 核心服务
-│   ├── browser_register.py  # camoufox 浏览器注册引擎
-│   ├── register_engine.py   # 注册引擎（批量调度）
-│   ├── email_service.py     # 邮箱验证码获取
+│   ├── protocol_register.py # 纯协议注册引擎（curl_cffi + sentinel）
+│   ├── browser_register.py  # camoufox 浏览器注册引擎（兜底）
+│   ├── browser_selectors.py # 页面选择器集中管理（上游改版只改这一处）
+│   ├── register_engine.py   # 注册引擎（并发批量调度 + 失败分类）
+│   ├── sentinel.py          # OpenAI Sentinel PoW token 生成
+│   ├── email_service.py     # 98faka 邮箱验证码获取
+│   ├── graph_email_service.py # Microsoft Graph 取码（token LRU 缓存）
+│   ├── imap_email_service.py # IMAP 取码
 │   ├── proxy_service.py     # 代理池（kookeey + 通用 HTTP）
+│   ├── proxy_chain.py       # 本地链式代理服务（kookeey 凭据从 proxies.txt 读取）
 │   ├── cf_solver_service.py # CF Solver 对接
-│   └── db.py                # SQLite 数据库
+│   ├── login_detector.py    # 登录页形态检测 / CF 识别
+│   ├── name_service.py      # 随机姓名生成
+│   └── db.py                # SQLite 数据库（db_session 连接管理）
 ├── cf_solver/               # CF 验证 solver（端口 8001）
-├── web_dist/index.html      # 前端控制台
+├── web_dist/index.html      # 前端控制台（搜索/分页/主题）
 ├── scripts/                 # 独立脚本（批量/对接 chatgpt2api）
-└── data/                    # SQLite 数据库 + 日志（勿提交）
+│   └── archive/             # 已归档的旧版实验脚本
+├── tests/                   # 测试套件（覆盖率 ≥70%）
+├── 计划书/                   # 改进指南 / 规划文档
+└── data/                    # SQLite 数据库 + 日志 + 备份（勿提交）
 ```
 
 ---
@@ -102,16 +118,46 @@ GPT-Auto-Register/
 | 键 | 说明 | 默认 |
 |----|------|------|
 | `auth_key` | 控制台管理密钥（/api 接口鉴权，启用后前端设置页需填写） | - |
+| `auth_enforced` | 强制鉴权：`true` 且 auth_key 为占位符时启动失败（fail-fast），杜绝"假安全" | `false` |
 | `port` | 主服务端口 | `23457` |
 | `proxy_file` | 代理池文件 | `proxies.txt` |
 | `email_source_url` | 91kami 邮箱源 URL | - |
 | `email_api_base` | 邮件 API 地址 | `https://app.98faka.top` |
+| `register_concurrency` | 批量注册并发数 | `1` |
 | `register_interval_sec` | 注册间隔（秒） | `10` |
 | `otp_wait_timeout_sec` | 验证码等待超时 | `600` |
+| `otp_poll_interval_sec` | 验证码轮询间隔 | `5` |
+| `otp_min_age_window_sec` | 验证码时间过滤窗口（只取触发点 N 秒内到达的邮件） | `120` |
+| `otp_fallback_after_sec` | 无新邮件多久后回看历史邮件 | `40` |
+| `otp_backfill_window_min` | 回看历史邮件的窗口（分钟） | `15` |
 | `batch_size` | 默认批量数量 | `100` |
 | `use_oauth_pkce` | 注册时走 OAuth PKCE 获取 OpenAI refresh_token（长期续期） | `true` |
+| `protocol_first` | 纯协议注册优先（curl_cffi + sentinel，无浏览器），失败自动降级浏览器 | `true` |
+| `use_browser` | 是否允许浏览器兜底（camoufox）；`false` 时协议失败即停止 | `true` |
+| `user_agent` | 自定义 User-Agent | Chrome UA |
+| `log_retention_days` | 运行日志保留天数（超过自动清理） | `30` |
 | `chatgpt2api_url` | chatgpt2api 地址 | `http://127.0.0.1:23456` |
 | `chatgpt2api_admin_key` | chatgpt2api 管理密钥（留空自动读取） | - |
+
+---
+
+## 🛡️ 注册方式：协议 vs 浏览器
+
+系统采用 **协议为主、浏览器兜底** 策略：
+
+| 方式 | 说明 | 触发 |
+|------|------|------|
+| **纯协议**（默认优先） | curl_cffi + sentinel 风控参数，**完全无浏览器**，快、省资源。见 `services/protocol_register.py` | `protocol_first=true`（默认） |
+| **浏览器兜底** | camoufox 真实浏览器执行 JS，处理协议被拒的场景。见 `services/browser_register.py` | 协议失败（网络/5xx）且 `use_browser=true` |
+
+**降级规则**：
+- 协议成功 → 直接返回三件套（`access_token + refresh_token + id_token`）
+- 协议失败（网络 / 5xx / 超时）且 `use_browser=true` → 自动降级浏览器注册
+- 协议失败（风控：`account_deactivated` / `registration_disallowed` / 验证码限流）→ **不降级**，直接失败（浏览器同样会被拒，避免无谓重试触发限流）
+
+**sentinel 来源**：协议注册所需的风控参数生成器已从 chatgpt2api 移植到本项目 `services/sentinel.py`，运行**不依赖** chatgpt2api 项目路径。独立批量协议脚本见 `scripts/revive_protocol.py`。
+
+> 批量实测：`cd scripts && python revive_protocol.py --limit 10`（纯协议）或 `python revive_import.py`（浏览器）。
 
 ---
 

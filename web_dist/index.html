@@ -6,7 +6,8 @@
 <title>GPT 自动注册 - 控制台</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-:root{--bg:#0f172a;--card:#1e293b;--border:#334155;--text:#e2e8f0;--text2:#94a3b8;--accent:#3b82f6;--green:#22c55e;--red:#ef4444;--yellow:#eab308;--orange:#f97316}
+:root{--bg:#0f172a;--card:#1e293b;--border:#334155;--text:#e2e8f0;--text2:#94a3b8;--accent:#3b82f6;--green:#22c55e;--red:#ef4444;--yellow:#eab308;--orange:#f97316;--input-bg:#0a0f1a;--log-bg:#0a0f1a}
+html[data-theme="light"]{--bg:#f1f5f9;--card:#ffffff;--border:#e2e8f0;--text:#0f172a;--text2:#64748b;--accent:#2563eb;--green:#16a34a;--red:#dc2626;--yellow:#ca8a04;--orange:#ea580c;--input-bg:#f8fafc;--log-bg:#f8fafc}
 body{font-family:"SF Pro Display","PingFang SC","Microsoft YaHei",sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
 .header{background:var(--card);border-bottom:1px solid var(--border);padding:16px 24px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:10}
 .header h1{font-size:20px;font-weight:700}
@@ -60,12 +61,12 @@ tr:hover{background:rgba(59,130,246,.05)}
 .tag.cf{background:rgba(249,115,22,.2);color:var(--orange)}
 .tag.used{background:rgba(34,197,94,.15);color:var(--green)}
 .tag.danger{background:rgba(239,68,68,.2);color:var(--red)}
-.log-box{background:#0a0f1a;border:1px solid var(--border);border-radius:8px;padding:12px;height:340px;overflow-y:auto;font-family:Consolas,monospace;font-size:12px;line-height:1.8}
+.log-box{background:var(--log-bg);border:1px solid var(--border);border-radius:8px;padding:12px;height:340px;overflow-y:auto;font-family:Consolas,monospace;font-size:12px;line-height:1.8}
 .log-box .log-info{color:var(--text2)}
 .log-box .log-warning{color:var(--yellow)}
 .log-box .log-error{color:var(--red)}
 .log-box .log-time{color:#475569}
-input[type=text],input[type=number],input[type=url],input[type=password],textarea{background:#0a0f1a;border:1px solid var(--border);border-radius:8px;padding:10px 14px;color:var(--text);font-size:14px;width:100%;outline:none;font-family:inherit}
+input[type=text],input[type=number],input[type=url],input[type=password],textarea{background:var(--input-bg);border:1px solid var(--border);border-radius:8px;padding:10px 14px;color:var(--text);font-size:14px;width:100%;outline:none;font-family:inherit}
 textarea{font-family:Consolas,monospace;font-size:12px;resize:vertical;min-height:120px}
 input:focus,textarea:focus{border-color:var(--accent)}
 .form-group{margin-bottom:16px}
@@ -97,6 +98,7 @@ input:focus,textarea:focus{border-color:var(--accent)}
 .progress-bar .fill{background:var(--accent);height:100%;border-radius:8px;transition:width .3s;width:0}
 #toast{position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:var(--card);border:1px solid var(--border);border-radius:8px;padding:10px 18px;font-size:13px;z-index:200;display:none;box-shadow:0 4px 20px rgba(0,0,0,.4)}
 @media(max-width:768px){.form-row{flex-direction:column}.grid{grid-template-columns:repeat(3,1fr)}}
+@media(max-width:480px){.grid{grid-template-columns:repeat(2,1fr)}.controls .btn{flex:1 1 45%}.controls{flex-direction:column}.controls .grow{flex:1 1 auto}.header{flex-direction:column;gap:10px}}
 </style>
 </head>
 <body>
@@ -107,6 +109,7 @@ input:focus,textarea:focus{border-color:var(--accent)}
     <span id="statusBadge" class="badge stopped">已停止</span>
     <span id="proxyInfo" style="font-size:12px;color:var(--text2)"></span>
     <label class="switch-row" style="margin:0"><input type="checkbox" id="showPw" onchange="togglePw()">显示密码</label>
+    <button class="btn btn-ghost btn-sm" onclick="toggleTheme()" title="切换深浅色">🌓 主题</button>
   </div>
 </div>
 
@@ -155,6 +158,20 @@ input:focus,textarea:focus{border-color:var(--accent)}
       <h2>注册记录 <button class="btn btn-ghost btn-sm" onclick="loadAccounts()">刷新</button>
         <button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="loadAccounts()">共 <span id="accCount">0</span> 条</button>
       </h2>
+      <div class="controls" style="margin-bottom:12px">
+        <input type="text" id="accSearch" placeholder="🔍 搜索邮箱..." style="max-width:240px" oninput="accPage=0;loadAccounts()">
+        <select id="accStatus" style="max-width:160px" onchange="accPage=0;loadAccounts()">
+          <option value="">全部状态</option>
+          <option value="success">成功</option>
+          <option value="failed">失败</option>
+          <option value="cf_blocked">CF拦截</option>
+          <option value="success_no_token">成功(无token)</option>
+          <option value="pending">待处理</option>
+        </select>
+        <button class="btn btn-ghost btn-sm" onclick="accPage=Math.max(0,accPage-1);loadAccounts()">◀ 上一页</button>
+        <span class="muted" id="accPageInfo">第 1 页</span>
+        <button class="btn btn-ghost btn-sm" onclick="accPage=accPage+1;loadAccounts()">下一页 ▶</button>
+      </div>
       <div style="overflow-x:auto">
       <table>
         <thead><tr><th>#</th><th>邮箱</th><th>密码</th><th>姓名</th><th>生日</th><th>状态</th><th>代理</th><th>Token</th><th>错误</th><th>时间</th></tr></thead>
@@ -173,6 +190,17 @@ input:focus,textarea:focus{border-color:var(--accent)}
         <button class="btn btn-danger btn-sm" onclick="clearEmails()" style="margin-left:auto">清空邮箱池</button>
       </h2>
       <div class="hint">邮箱池是微软邮箱账号，用于接收注册验证码。格式：<code>邮箱----密码----client_id----refresh_token</code>（每行一个，可从 91kami 导出或手动粘贴）。</div>
+      <div class="controls" style="margin-bottom:12px">
+        <input type="text" id="emSearch" placeholder="🔍 搜索邮箱..." style="max-width:240px" oninput="emPage=0;loadEmails()">
+        <select id="emStatus" style="max-width:160px" onchange="emPage=0;loadEmails()">
+          <option value="">全部状态</option>
+          <option value="pending">待注册</option>
+          <option value="used">已使用</option>
+        </select>
+        <button class="btn btn-ghost btn-sm" onclick="emPage=Math.max(0,emPage-1);loadEmails()">◀ 上一页</button>
+        <span class="muted" id="emPageInfo">第 1 页</span>
+        <button class="btn btn-ghost btn-sm" onclick="emPage=emPage+1;loadEmails()">下一页 ▶</button>
+      </div>
       <div style="overflow-x:auto">
       <table>
         <thead><tr><th>#</th><th>邮箱</th><th>密码</th><th>client_id</th><th>refresh_token</th><th>状态</th><th>导入时间</th><th>操作</th></tr></thead>
@@ -208,7 +236,7 @@ input:focus,textarea:focus{border-color:var(--accent)}
   <!-- 日志 -->
   <div class="tab-content" id="tab-logs">
     <div class="panel">
-      <h2>运行日志 <button class="btn btn-ghost btn-sm" onclick="loadLogs()">刷新</button>
+      <h2>运行日志 <button class="btn btn-ghost btn-sm" onclick="loadLogs(true)">刷新</button>
         <button class="btn btn-danger btn-sm" onclick="clearLogs()" style="margin-left:auto">清空日志</button>
       </h2>
       <div class="log-box" id="logBox"></div>
@@ -232,8 +260,19 @@ input:focus,textarea:focus{border-color:var(--accent)}
         <div class="form-group"><label>chatgpt2api 管理密钥 (留空自动读取)</label><input type="password" id="cfgC2apiKey" placeholder="chatgpt2api admin key"></div>
       </div>
       <div class="form-row">
-        <div class="form-group"><label>控制台管理密钥 (auth_key)</label><input type="password" id="cfgAuthKey" placeholder="config.json 的 auth_key"></div>
-        <div class="form-group"><label></label><div class="muted" style="padding-top:6px">用于 /api 接口鉴权，启用后首次访问需填写保存</div></div>
+        <div class="form-group"><label>注册并发数</label><input type="number" id="cfgConcurrency" value="1" min="1"></div>
+        <div class="form-group"><label>验证码轮询间隔 (秒)</label><input type="number" id="cfgOtpPoll" value="5" min="1"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>邮件源 API Base</label><input type="url" id="cfgEmailApiBase" placeholder="https://app.98faka.top"></div>
+        <div class="form-group"><label>User-Agent</label><input type="text" id="cfgUserAgent" placeholder="Mozilla/5.0 ..."></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>注册方式</label>
+          <div class="switch-row"><input type="checkbox" id="cfgProtocolFirst" checked>协议注册优先（curl_cffi + sentinel，无浏览器）</div>
+          <div class="switch-row"><input type="checkbox" id="cfgUseBrowser" checked>允许浏览器兜底（camoufox）</div>
+        </div>
+        <div class="form-group"><label></label><div class="muted" style="padding-top:6px">协议为主、浏览器兜底；风控类失败不降级，避免触发验证码限流</div></div>
       </div>
       <button class="btn btn-primary" onclick="saveSettings()">💾 保存设置</button>
       <button class="btn btn-ghost" onclick="openAdvanced()" style="margin-left:8px">⚙️ 高级设置</button>
@@ -255,9 +294,15 @@ input:focus,textarea:focus{border-color:var(--accent)}
 
 <script>
 const API = '';
-let authKey = localStorage.getItem('gptAuthKey') || '';
+// 内部工具：无管理密钥鉴权
 let pollTimer = null;
 let showPasswords = false;
+let accPage = 0;
+let emPage = 0;
+let lastLogId = 0;
+let taskRunning = false;
+const ACC_PAGE_SIZE = 50;
+const EM_PAGE_SIZE = 50;
 
 function escapeHtml(s) {
   if (s === null || s === undefined) return '';
@@ -267,10 +312,9 @@ function escapeHtml(s) {
 }
 
 async function api(path, opts = {}) {
-  const resp = await fetch(API + '/api' + path, {
-    headers: { 'Content-Type': 'application/json' },
-    ...opts,
-  });
+  // 内部工具：无需管理密钥鉴权（后端 auth_key 为占位符时全部放行）
+  const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+  const resp = await fetch(API + '/api' + path, { ...opts, headers });
   if (!resp.ok) {
     let msg = 'HTTP ' + resp.status;
     try { const j = await resp.json(); msg = j.detail || msg; } catch(e) {}
@@ -326,6 +370,7 @@ async function refreshStatus() {
     document.getElementById('btnPause').disabled = !data.is_running || data.is_paused;
     document.getElementById('btnResume').disabled = !data.is_running || !data.is_paused;
     document.getElementById('btnStop').disabled = !data.is_running;
+    taskRunning = !!data.is_running;
     updateStats(data.stats);
     updateTask(data.task);
   } catch (e) { console.error(e); }
@@ -465,7 +510,7 @@ async function confirmClear() {
   const btn = document.getElementById('btnConfirmClear');
   btn.disabled = true;
   try {
-    const data = await api('/register/clear', { method: 'POST', body: '{}' });
+    const data = await api('/register/clear', { method: 'POST', body: JSON.stringify({ confirm: v }) });
     closeModal();
     toast(`已清空: 注册记录 ${data.deleted.accounts}, 邮箱 ${data.deleted.emails}, 任务 ${data.deleted.tasks}`);
     refreshStatus(); loadAccounts(); loadEmails();
@@ -476,10 +521,17 @@ async function confirmClear() {
 // ── 注册记录 ──
 async function loadAccounts() {
   try {
-    const data = await api('/register/accounts?limit=200');
+    const search = document.getElementById('accSearch').value.trim();
+    const status = document.getElementById('accStatus').value;
+    const params = new URLSearchParams({ limit: ACC_PAGE_SIZE, offset: accPage * ACC_PAGE_SIZE });
+    if (status) params.set('status', status);
+    if (search) params.set('search', search);
+    const data = await api('/register/accounts?' + params.toString());
     const tbody = document.getElementById('accountsBody');
     const empty = document.getElementById('accountsEmpty');
-    document.getElementById('accCount').textContent = data.accounts ? data.accounts.length : 0;
+    document.getElementById('accCount').textContent = data.total || 0;
+    const pageCount = Math.max(1, Math.ceil((data.total || 0) / ACC_PAGE_SIZE));
+    document.getElementById('accPageInfo').textContent = `第 ${accPage + 1}/${pageCount} 页`;
     if (!data.accounts || data.accounts.length === 0) {
       tbody.innerHTML = ''; empty.style.display = 'block'; return;
     }
@@ -494,7 +546,7 @@ async function loadAccounts() {
         : '<span class="tag pending">待处理</span>';
       const time = a.registered_at ? new Date(a.registered_at * 1000).toLocaleString() : '-';
       return `<tr>
-        <td>${i + 1}</td>
+        <td>${accPage * ACC_PAGE_SIZE + i + 1}</td>
         <td class="mono">${escapeHtml(a.email)}</td>
         <td>${pwCell(a.password)}</td>
         <td>${escapeHtml(a.name || '-')}</td>
@@ -512,9 +564,16 @@ async function loadAccounts() {
 // ── 邮箱池 ──
 async function loadEmails() {
   try {
-    const data = await api('/emails/?limit=500');
+    const search = document.getElementById('emSearch').value.trim();
+    const status = document.getElementById('emStatus').value;
+    const params = new URLSearchParams({ limit: EM_PAGE_SIZE, offset: emPage * EM_PAGE_SIZE });
+    if (status) params.set('status', status);
+    if (search) params.set('search', search);
+    const data = await api('/emails/?' + params.toString());
     const tbody = document.getElementById('emailsBody');
     const empty = document.getElementById('emailsEmpty');
+    const pageCount = Math.max(1, Math.ceil((data.total || 0) / EM_PAGE_SIZE));
+    document.getElementById('emPageInfo').textContent = `第 ${emPage + 1}/${pageCount} 页`;
     if (!data.emails || data.emails.length === 0) {
       tbody.innerHTML = ''; empty.style.display = 'block'; return;
     }
@@ -525,7 +584,7 @@ async function loadEmails() {
         : '<span class="tag skipped">' + escapeHtml(e.status) + '</span>';
       const time = e.created_at ? new Date(e.created_at * 1000).toLocaleString() : '-';
       return `<tr>
-        <td>${i + 1}</td>
+        <td>${emPage * EM_PAGE_SIZE + i + 1}</td>
         <td class="mono">${escapeHtml(e.email)}</td>
         <td>${pwCell(e.password)}</td>
         <td>${tokenCell(e.client_id)}</td>
@@ -606,23 +665,30 @@ async function clearProxies() {
   } catch (e) { alert('失败: ' + e.message); }
 }
 
-// ── 日志 ──
-async function loadLogs() {
+// ── 日志（增量拉取：记录 lastLogId，只拉新增，降低轮询压力） ──
+async function loadLogs(force) {
+  if (force) lastLogId = 0;  // 手动刷新 / 切页：全量重置
   try {
-    const data = await api('/logs?limit=1000');
+    const url = '/logs?limit=1000' + (lastLogId ? '&after_id=' + lastLogId : '');
+    const data = await api(url);
     const box = document.getElementById('logBox');
-    if (!data.logs || data.logs.length === 0) { box.innerHTML = '<div class="log-info">暂无日志</div>'; return; }
-    box.innerHTML = data.logs.map(l => {
+    if (!data.logs || data.logs.length === 0) {
+      if (!lastLogId) box.innerHTML = '<div class="log-info">暂无日志</div>';
+      return;
+    }
+    if (!lastLogId) box.innerHTML = '';  // 首次/重置：清空后全量渲染
+    box.insertAdjacentHTML('beforeend', data.logs.map(l => {
       const time = new Date(l.created_at * 1000).toLocaleTimeString();
       const cls = l.level === 'error' ? 'log-error' : l.level === 'warning' ? 'log-warning' : 'log-info';
       return `<div class="${cls}"><span class="log-time">[${time}]</span> ${escapeHtml(l.message)}</div>`;
-    }).reverse().join('');
+    }).join(''));
+    data.logs.forEach(l => { if (l.id > lastLogId) lastLogId = l.id; });
     box.scrollTop = box.scrollHeight;
   } catch (e) { console.error(e); }
 }
 async function clearLogs() {
   if (!confirm('确定清空日志？')) return;
-  try { await api('/logs/clear', { method: 'POST', body: '{}' }); loadLogs(); toast('日志已清空'); }
+  try { await api('/logs/clear', { method: 'POST', body: '{}' }); loadLogs(true); toast('日志已清空'); }
   catch (e) { alert('清空失败: ' + e.message); }
 }
 
@@ -636,7 +702,15 @@ async function loadSettings() {
     document.getElementById('cfgBatchSize').value = cfg.batch_size || 100;
     document.getElementById('cfgC2apiUrl').value = cfg.chatgpt2api_url || 'http://127.0.0.1:23456';
     document.getElementById('cfgC2apiKey').value = cfg.chatgpt2api_admin_key || '';
-    document.getElementById('cfgAuthKey').value = localStorage.getItem('gptAuthKey') || '';
+    document.getElementById('cfgConcurrency').value = cfg.register_concurrency || 1;
+    document.getElementById('cfgOtpPoll').value = cfg.otp_poll_interval_sec || 5;
+    document.getElementById('cfgEmailApiBase').value = cfg.email_api_base || 'https://app.98faka.top';
+    document.getElementById('cfgUserAgent').value = cfg.user_agent || '';
+    // 注册方式开关：兼容未配置 / 布尔 / 字符串 'true'/'false'（settings API 存字符串）
+    const boolOf = (v, def) => (v === undefined || v === null) ? def
+      : (v === true || v === 'true' || v === '1' || v === 1);
+    document.getElementById('cfgProtocolFirst').checked = boolOf(cfg.protocol_first, true);
+    document.getElementById('cfgUseBrowser').checked = boolOf(cfg.use_browser, true);
   } catch (e) { console.error(e); }
 }
 
@@ -648,10 +722,20 @@ async function saveSettings() {
       { key: 'otp_wait_timeout_sec', value: document.getElementById('cfgOtpTimeout').value },
       { key: 'batch_size', value: document.getElementById('cfgBatchSize').value },
       { key: 'chatgpt2api_url', value: document.getElementById('cfgC2apiUrl').value },
-      { key: 'chatgpt2api_admin_key', value: document.getElementById('cfgC2apiKey').value },
+      { key: 'register_concurrency', value: document.getElementById('cfgConcurrency').value },
+      { key: 'otp_poll_interval_sec', value: document.getElementById('cfgOtpPoll').value },
+      { key: 'email_api_base', value: document.getElementById('cfgEmailApiBase').value },
+      { key: 'user_agent', value: document.getElementById('cfgUserAgent').value },
     ];
+    // 掩码占位符不覆盖真实密钥（服务端已对敏感字段脱敏为 ******）
+    const keyValue = document.getElementById('cfgC2apiKey').value;
+    if (keyValue && keyValue !== '******') {
+      settings.push({ key: 'chatgpt2api_admin_key', value: keyValue });
+    }
+    // 注册方式：协议优先 / 浏览器兜底（存字符串，后端 _as_bool 解析）
+    settings.push({ key: 'protocol_first', value: document.getElementById('cfgProtocolFirst').checked ? 'true' : 'false' });
+    settings.push({ key: 'use_browser', value: document.getElementById('cfgUseBrowser').checked ? 'true' : 'false' });
     for (const s of settings) await api('/settings/', { method: 'POST', body: JSON.stringify(s) });
-    localStorage.setItem('gptAuthKey', document.getElementById('cfgAuthKey').value.trim());
     toast('设置已保存');
   } catch (e) { alert('保存失败: ' + e.message); }
 }
@@ -733,6 +817,23 @@ function togglePw() {
   loadAccounts(); loadEmails();
 }
 
+// ── 主题（深浅色） ──
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme);
+  try { localStorage.setItem('gpt-reg-theme', theme); } catch (e) {}
+}
+function toggleTheme() {
+  const cur = document.documentElement.getAttribute('data-theme');
+  applyTheme(cur === 'light' ? 'dark' : 'light');
+}
+// 初始化：优先本地记忆，其次跟随系统
+(function initTheme() {
+  let saved = null;
+  try { saved = localStorage.getItem('gpt-reg-theme'); } catch (e) {}
+  const theme = saved || (window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+  document.documentElement.setAttribute('data-theme', theme);
+})();
+
 function switchTab(name, el) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
@@ -741,24 +842,30 @@ function switchTab(name, el) {
   if (name === 'accounts') loadAccounts();
   else if (name === 'emails') loadEmails();
   else if (name === 'proxies') loadProxies();
-  else if (name === 'logs') loadLogs();
+  else if (name === 'logs') loadLogs(true);
   else if (name === 'settings') loadSettings();
 }
 
-// ── 轮询 ──
+// ── 轮询（降载：页面隐藏暂停；注册记录仅在任务运行时刷新；日志增量拉取） ──
 function startPolling() {
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = setInterval(() => {
+    if (document.hidden) return;
     refreshStatus();
-    loadAccounts();
+    if (taskRunning) loadAccounts();
     loadLogs();
   }, 3000);
 }
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) {
+    refreshStatus(); loadAccounts(); loadLogs(true);
+  }
+});
 
 // ── 初始化 ──
 refreshStatus();
 loadAccounts();
-loadLogs();
+loadLogs(true);
 loadSettings();
 startPolling();
 </script>

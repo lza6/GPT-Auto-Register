@@ -19,14 +19,46 @@ import argparse
 import asyncio
 import base64
 import sys
+from pathlib import Path
 from urllib.parse import urlparse
 
 UPSTREAM_SOCKS5 = "socks5://127.0.0.1:10808"
 KOOKEEY_GATEWAY = "gate.kookeey.info"
 KOOKEEY_PORT = 1000
-# kookeey 账密（从 proxies.txt 读取）
-KOOKEEY_USER = "1023701-4a2c845a"
-KOOKEEY_PASS = "12843fee-US"
+
+
+def load_kookeey_credentials(proxy_file: str | Path | None = None) -> tuple[str, str]:
+    """从 proxies.txt 第一条 kookeey 行解析 (user, password)。
+
+    kookeey 行格式: gateway:port:UserID-SecurityUser:Pass-Country
+    解析结果: user = "UserID-SecurityUser", password = "Pass-Country"。
+    未找到返回 ("", "")。
+    """
+    path = Path(proxy_file) if proxy_file else Path(__file__).resolve().parent.parent / "proxies.txt"
+    if not path.exists():
+        return "", ""
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except UnicodeDecodeError:
+        lines = path.read_text(encoding="gbk", errors="ignore").splitlines()
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(":")
+        if len(parts) >= 4 and "-" in parts[2]:
+            user_parts = parts[2].split("-")
+            pass_parts = parts[3].split("-")
+            user = f"{user_parts[0]}-{user_parts[1] if len(user_parts) > 1 else ''}"
+            pwd = f"{pass_parts[0]}-{pass_parts[1] if len(pass_parts) > 1 else 'US'}"
+            return user, pwd
+    return "", ""
+
+
+# kookeey 账密：从 proxies.txt 解析，不再硬编码（可用 --kookeey-user/--kookeey-pass 覆盖）
+KOOKEEY_USER, KOOKEEY_PASS = load_kookeey_credentials()
+if not KOOKEEY_USER:
+    sys.stderr.write("[proxy-chain] 警告: proxies.txt 中未找到 kookeey 凭据，链式代理认证将失败\n")
 
 
 async def pipe_forward(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -226,12 +258,19 @@ async def handle_client(client_reader: asyncio.StreamReader, client_writer: asyn
 
 
 async def main():
+    global KOOKEEY_USER, KOOKEEY_PASS
+
     parser = argparse.ArgumentParser(description="本地链式代理服务")
     parser.add_argument("--listen", default="127.0.0.1:10809", help="监听地址")
     parser.add_argument("--upstream", default=UPSTREAM_SOCKS5, help="上游 v2ray SOCKS5 代理（留空则直连 kookeey）")
     parser.add_argument("--gateway", default=KOOKEEY_GATEWAY, help="kookeey 网关")
     parser.add_argument("--gateway-port", type=int, default=KOOKEEY_PORT, help="kookeey 端口")
+    parser.add_argument("--kookeey-user", default=KOOKEEY_USER, help="kookeey 用户名（默认从 proxies.txt 解析）")
+    parser.add_argument("--kookeey-pass", default=KOOKEEY_PASS, help="kookeey 密码（默认从 proxies.txt 解析）")
     args = parser.parse_args()
+    if args.kookeey_user:
+        KOOKEEY_USER = args.kookeey_user
+        KOOKEEY_PASS = args.kookeey_pass
 
     host, port = args.listen.split(":", 1)
     port = int(port)

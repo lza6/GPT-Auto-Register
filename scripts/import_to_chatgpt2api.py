@@ -69,16 +69,28 @@ def refresh_access_token(refresh_token: str, client_id: str = "app_2SKx67EdpoN0G
         return None
 
 
-def import_to_chatgpt2api(accounts: list[dict], chatgpt2api_dir: str) -> dict:
-    """把账号导入到 chatgpt2api 的账号池"""
-    chatgpt2api_data = Path(chatgpt2api_dir) / "data" / "accounts.json"
-    if not chatgpt2api_data.exists():
-        print(f"chatgpt2api 账号池文件不存在: {chatgpt2api_data}")
-        return {"added": 0, "skipped": 0, "error": "file not found"}
+def import_to_chatgpt2api(accounts: list[dict], chatgpt2api_dir: str, output: str | None = None) -> dict:
+    """把账号导入到 chatgpt2api 的账号池。
 
-    # 读取现有账号
-    existing = json.loads(chatgpt2api_data.read_text(encoding="utf-8"))
-    existing_tokens = {a.get("access_token") for a in existing if a.get("access_token")}
+    默认把账号合并写入 chatgpt2api 的 accounts.json（需 chatgpt2api 处于停止状态，
+    否则运行中的进程会以内存数据覆盖文件导致导入丢失）。
+    指定 --output 时改为生成一个独立 JSON 文件，用于 chatgpt2api 管理后台的
+    "账号 JSON 文件导入"（走 API，运行中也能导，password 字段会被保留用于后续 re-login）。
+    """
+    if output:
+        # 导出模式：生成可导入文件，不碰运行中的账号池
+        existing: list = []
+        existing_tokens: set[str] = set()
+        chatgpt2api_data: Path | None = None
+    else:
+        chatgpt2api_data = Path(chatgpt2api_dir) / "data" / "accounts.json"
+        if not chatgpt2api_data.exists():
+            print(f"chatgpt2api 账号池文件不存在: {chatgpt2api_data}")
+            return {"added": 0, "skipped": 0, "error": "file not found"}
+
+        # 读取现有账号
+        existing = json.loads(chatgpt2api_data.read_text(encoding="utf-8"))
+        existing_tokens = {a.get("access_token") for a in existing if a.get("access_token")}
 
     added = 0
     skipped = 0
@@ -88,15 +100,30 @@ def import_to_chatgpt2api(accounts: list[dict], chatgpt2api_dir: str) -> dict:
     for acc in accounts:
         email = acc.get("email", "")
         access_token = acc.get("access_token", "")
-        refresh_token = acc.get("refresh_token", "")
+        # chatgpt2api 刷新需要 OpenAI 的 refresh_token（rt.1 开头）。
+        # 数据库 refresh_token 字段存的是微软 MSAL token（M. 开头），不能用于 OpenAI OAuth，
+        # 也没有就不要填（留空则 chatgpt2api 走 re-login 密码恢复）。
+        refresh_token = acc.get("openai_refresh_token") or ""
         name = acc.get("name", "")
 
-        if not access_token or not refresh_token:
+        if not access_token:
             skipped += 1
             continue
 
-        # 如果 access_token 是 HEX 格式（CSRF token），需要刷新获取真正的 JWT
-        if not access_token.startswith("eyJ"):
+        # 导出模式：有 OpenAI refresh_token 则自动刷新拿最新 token
+        #（自动注册账号都带 openai_refresh_token，刷新是 OAuth 正常流程，不触发密码风控）
+        if output and refresh_token:
+            token_data = refresh_access_token(refresh_token)
+            if token_data:
+                access_token = token_data["access_token"]
+                refresh_token = token_data["refresh_token"]
+                refreshed += 1
+            else:
+                failed_refresh += 1
+                print(f"  刷新失败，保留原 token 导出（密码可后续 re-login 恢复）")
+        # 非导出模式：HEX token（CSRF）尝试用 refresh_token 刷新。
+        # 刷新失败也保留原账号：账号带 password，可在 chatgpt2api 用 re-login 密码恢复。
+        elif not access_token.startswith("eyJ") and not output:
             print(f"  刷新 {email} 的 token...")
             token_data = refresh_access_token(refresh_token)
             if token_data:
@@ -105,7 +132,7 @@ def import_to_chatgpt2api(accounts: list[dict], chatgpt2api_dir: str) -> dict:
                 refreshed += 1
             else:
                 failed_refresh += 1
-                continue
+                print(f"  刷新失败，保留原 token 导入（密码可后续 re-login 恢复）")
 
         if access_token in existing_tokens:
             skipped += 1
@@ -117,7 +144,7 @@ def import_to_chatgpt2api(accounts: list[dict], chatgpt2api_dir: str) -> dict:
             "refresh_token": refresh_token,
             "id_token": "",  # id_token 需要从 OAuth 响应中获取
             "email": email,
-            "password": acc.get("password", ""),
+            "password": acc.get("openai_password", ""),  # OpenAI 登录密码，用于 re-login 恢复 token
             "type": "free",
             "status": "正常",
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -126,8 +153,11 @@ def import_to_chatgpt2api(accounts: list[dict], chatgpt2api_dir: str) -> dict:
         existing_tokens.add(access_token)
         added += 1
 
-    # 写回账号池
-    chatgpt2api_data.write_text(json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8")
+    # 写回账号池或导出文件
+    if output:
+        Path(output).write_text(json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8")
+    else:
+        chatgpt2api_data.write_text(json.dumps(existing, indent=2, ensure_ascii=False), encoding="utf-8")
 
     return {
         "added": added,
@@ -144,6 +174,8 @@ def main():
                         help="chatgpt2api 项目目录")
     parser.add_argument("--refresh-all", action="store_true",
                         help="强制刷新所有账号的 token")
+    parser.add_argument("--output", default=None,
+                        help="导出到指定 JSON 文件（不写 accounts.json），用于 chatgpt2api 管理后台导入")
     args = parser.parse_args()
 
     print("读取注册账号...")
@@ -159,10 +191,13 @@ def main():
                     acc["access_token"] = token_data["access_token"]
                     acc["refresh_token"] = token_data["refresh_token"]
 
-    print(f"导入到 chatgpt2api: {args.chatgpt2api_dir}")
-    result = import_to_chatgpt2api(accounts, args.chatgpt2api_dir)
-    print(f"导入完成: 新增 {result['added']}, 跳过 {result['skipped']}, 刷新 {result['refreshed']}, 刷新失败 {result['failed_refresh']}")
-    print(f"chatgpt2api 账号池总数: {result['total']}")
+    if args.output:
+        print(f"导出到文件: {args.output}")
+    else:
+        print(f"导入到 chatgpt2api: {args.chatgpt2api_dir}")
+    result = import_to_chatgpt2api(accounts, args.chatgpt2api_dir, output=args.output)
+    print(f"处理完成: 新增 {result['added']}, 跳过 {result['skipped']}, 刷新 {result['refreshed']}, 刷新失败 {result['failed_refresh']}")
+    print(f"账号池总数: {result['total']}")
 
 
 if __name__ == "__main__":

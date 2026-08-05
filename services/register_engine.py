@@ -7,6 +7,15 @@ from typing import Any
 from services.db import add_log, insert_account, mark_email_status, get_accounts, update_task_progress
 
 
+def _as_bool(value, default: bool = True) -> bool:
+    """解析配置布尔值。settings API 把开关存为字符串（'true'/'false'），需兼容。"""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return default
+
+
 class RegisterEngine:
     """ChatGPT 自动注册引擎 — curl_cffi Firefox 指纹 + CF solver 兜底"""
 
@@ -21,6 +30,9 @@ class RegisterEngine:
         self.token_file = config.get("token_output_file", "已经获取到的token.txt")
         self._running = False
         self._paused = False
+        # 暂停/恢复用 asyncio.Event（避免 while+sleep 空转），stop 时 set 唤醒等待槽位
+        self._pause_event = asyncio.Event()
+        self._pause_event.set()
 
     @property
     def is_running(self) -> bool:
@@ -32,15 +44,18 @@ class RegisterEngine:
 
     def pause(self) -> None:
         self._paused = True
+        self._pause_event.clear()
         add_log("info", "注册任务已暂停")
 
     def resume(self) -> None:
         self._paused = False
+        self._pause_event.set()
         add_log("info", "注册任务已继续")
 
     def stop(self) -> None:
         self._running = False
         self._paused = False
+        self._pause_event.set()  # 唤醒等待中的槽位，让它们检查 running 后退出
         add_log("info", "注册任务已停止")
 
     def _append_token(self, token: str) -> None:
@@ -52,16 +67,31 @@ class RegisterEngine:
 
     async def register_one(self, email: str, password: str, client_id: str,
                            refresh_token: str) -> dict[str, Any]:
-        """注册单个账号 — 浏览器方式。
+        """注册单个账号 — 协议优先，浏览器兜底。
 
-        OpenAI 需要真实浏览器执行 sentinel 风控参数，纯协议（curl_cffi）注册已被官方拒绝，
-        因此不再提供协议降级，避免静默失败。
+        主路径：curl_cffi + sentinel 纯协议（services.protocol_register）。
+        协议失败且标记 ``fallback_browser``（网络/服务器临时错误）→ 降级浏览器；
+        风控/限流类失败不降级（浏览器同样会被拒，避免无谓重试）。
         """
-        use_browser = self.config.get("use_browser", True)
-        if not use_browser:
-            add_log("error", f"[{email}] use_browser=false 已不再支持：纯协议注册被 OpenAI 拒绝，请使用浏览器模式")
-            return {"email": email, "status": "failed", "error": "纯协议注册已不可用，请使用浏览器模式",
-                    "access_token": "", "name": "", "birthdate": "", "proxy": ""}
+        use_browser = _as_bool(self.config.get("use_browser"), True)
+        protocol_first = _as_bool(self.config.get("protocol_first"), True)
+
+        if protocol_first:
+            from services.protocol_register import get_protocol_register
+            protocol_reg = get_protocol_register(self.config)
+            result = await protocol_reg.register_one(email, password, client_id, refresh_token)
+            if result["status"] == "success":
+                return result
+            if use_browser and result.get("fallback_browser"):
+                add_log("warning", f"[{email}] 协议注册失败（{result['error']}），降级浏览器兜底")
+                return await self._register_with_browser(email, password, client_id, refresh_token)
+            return result
+
+        # 非协议优先模式：直接浏览器
+        return await self._register_with_browser(email, password, client_id, refresh_token)
+
+    async def _register_with_browser(self, email: str, password: str, client_id: str,
+                                     refresh_token: str) -> dict[str, Any]:
         try:
             from services.browser_register import get_browser_register
             browser_reg = get_browser_register(self.config)
@@ -71,95 +101,121 @@ class RegisterEngine:
             return {"email": email, "status": "failed", "error": str(e),
                     "access_token": "", "name": "", "birthdate": "", "proxy": ""}
 
-    async def run_batch(self, emails: list[dict[str, str]], task_id: int) -> dict[str, int]:
-        """批量注册：实时更新任务进度，支持断点续跑（emails 按 pending 状态驱动）。"""
+    async def run_batch(self, emails: list[dict[str, str]], task_id: int) -> dict[str, Any]:
+        """批量注册（并发）：并发度 = config.register_concurrency。
+
+        - 每账号独立注册（幂等），用 Semaphore 限流，asyncio.gather 并发执行。
+        - 暂停用 asyncio.Event 等待，停止时唤醒所有槽位并检查 running 退出。
+        - stats 累加与进度落库用 asyncio.Lock 保护。
+        - 断点续跑：emails 按 pending 状态驱动，已成功的账号跳过。
+        - 失败原因按 failure_type 分类统计（risk_control/otp_timeout/network/server_5xx/unknown）。
+        """
         self._running = True
-        stats = {"total": len(emails), "completed": 0, "failed": 0, "skipped": 0}
+        self._paused = False
+        self._pause_event = asyncio.Event()
+        self._pause_event.set()
+        concurrency = max(1, int(self.config.get("register_concurrency") or 1))
+        stats: dict[str, Any] = {
+            "total": len(emails), "completed": 0, "failed": 0, "skipped": 0,
+            "failure_types": {},
+        }
         # 预加载成功账号集合，只查一次，避免每账号全表扫描（O(N²)）
         success_emails = {a["email"] for a in get_accounts(status="success")}
-        interrupted = False
+        stats_lock = asyncio.Lock()
+        sem = asyncio.Semaphore(concurrency)
+        stopped = {"flag": False}
 
-        for i, mail in enumerate(emails):
-            if not self._running:
-                interrupted = True
-                add_log("info", "批量注册被停止")
-                break
-            while self._paused:
-                await asyncio.sleep(1)
-
+        async def process_one(i: int, mail: dict[str, str]) -> None:
             email = mail["email"]
-            add_log("info", f"━━━ [{i+1}/{len(emails)}] 开始注册: {email} ━━━")
+            async with sem:
+                # 暂停等待 + 停止检查（放在 sem 内：已排队但未开始的槽位也会被 pause/stop 拦下）
+                await self._pause_event.wait()
+                if not self._running:
+                    stopped["flag"] = True
+                    return
 
-            if email in success_emails:
-                add_log("info", f"[{email}] 已注册过，跳过")
-                stats["skipped"] += 1
-                mark_email_status(email, "used")
-                update_task_progress(task_id, stats["completed"], stats["failed"], stats["skipped"])
-                continue
+                add_log("info", f"━━━ [{i+1}/{len(emails)}] 开始注册: {email} ━━━")
 
-            result = await self.register_one(
-                email=email,
-                password=mail["password"],
-                client_id=mail["client_id"],
-                refresh_token=mail["refresh_token"],
-            )
+                if email in success_emails:
+                    add_log("info", f"[{email}] 已注册过，跳过")
+                    async with stats_lock:
+                        stats["skipped"] += 1
+                        mark_email_status(email, "used")
+                        update_task_progress(task_id, stats["completed"], stats["failed"], stats["skipped"])
+                    return
 
-            if result["status"] == "success":
-                stats["completed"] += 1
-                mark_email_status(email, "used")
-                if result["access_token"]:
-                    self._append_token(result["access_token"])
-                insert_account(
-                    email=email, password=mail["password"],
-                    client_id=mail["client_id"], refresh_token=mail["refresh_token"],
-                    openai_refresh_token=result.get("refresh_token", ""), id_token=result.get("id_token", ""),
-                    openai_password=result.get("openai_password", ""),
-                    access_token=result["access_token"],
-                    name=result["name"], birthdate=result["birthdate"],
-                    proxy=result["proxy"], status="success",
-                )
-            elif result["status"] == "cf_blocked":
-                stats["skipped"] += 1
-                insert_account(
-                    email=email, password=mail["password"],
-                    client_id=mail["client_id"], refresh_token=mail["refresh_token"],
-                    openai_refresh_token=result.get("refresh_token", ""), id_token=result.get("id_token", ""),
-                    openai_password=result.get("openai_password", ""),
-                    proxy=result["proxy"], status="cf_blocked",
-                    error="遇到 Cloudflare 人机验证",
-                )
-            elif result["status"] == "success_no_token":
-                stats["completed"] += 1
-                mark_email_status(email, "used")
-                insert_account(
-                    email=email, password=mail["password"],
-                    client_id=mail["client_id"], refresh_token=mail["refresh_token"],
-                    openai_refresh_token=result.get("refresh_token", ""), id_token=result.get("id_token", ""),
-                    openai_password=result.get("openai_password", ""),
-                    name=result["name"], birthdate=result["birthdate"],
-                    proxy=result["proxy"], status="success_no_token",
-                    error="注册成功但未获取到 token",
-                )
-            else:
-                stats["failed"] += 1
-                insert_account(
-                    email=email, password=mail["password"],
-                    client_id=mail["client_id"], refresh_token=mail["refresh_token"],
-                    openai_refresh_token=result.get("refresh_token", ""), id_token=result.get("id_token", ""),
-                    openai_password=result.get("openai_password", ""),
-                    proxy=result["proxy"], status="failed",
-                    error=result["error"],
+                result = await self.register_one(
+                    email=email,
+                    password=mail["password"],
+                    client_id=mail["client_id"],
+                    refresh_token=mail["refresh_token"],
                 )
 
-            update_task_progress(task_id, stats["completed"], stats["failed"], stats["skipped"])
+                async with stats_lock:
+                    if result["status"] == "success":
+                        stats["completed"] += 1
+                        mark_email_status(email, "used")
+                        if result["access_token"]:
+                            self._append_token(result["access_token"])
+                        insert_account(
+                            email=email, password=mail["password"],
+                            client_id=mail["client_id"], refresh_token=mail["refresh_token"],
+                            openai_refresh_token=result.get("refresh_token", ""), id_token=result.get("id_token", ""),
+                            openai_password=result.get("openai_password", ""),
+                            access_token=result["access_token"],
+                            name=result["name"], birthdate=result["birthdate"],
+                            proxy=result["proxy"], status="success",
+                        )
+                    elif result["status"] == "cf_blocked":
+                        stats["skipped"] += 1
+                        insert_account(
+                            email=email, password=mail["password"],
+                            client_id=mail["client_id"], refresh_token=mail["refresh_token"],
+                            openai_refresh_token=result.get("refresh_token", ""), id_token=result.get("id_token", ""),
+                            openai_password=result.get("openai_password", ""),
+                            proxy=result["proxy"], status="cf_blocked",
+                            error="遇到 Cloudflare 人机验证",
+                        )
+                    elif result["status"] == "success_no_token":
+                        stats["completed"] += 1
+                        mark_email_status(email, "used")
+                        insert_account(
+                            email=email, password=mail["password"],
+                            client_id=mail["client_id"], refresh_token=mail["refresh_token"],
+                            openai_refresh_token=result.get("refresh_token", ""), id_token=result.get("id_token", ""),
+                            openai_password=result.get("openai_password", ""),
+                            name=result["name"], birthdate=result["birthdate"],
+                            proxy=result["proxy"], status="success_no_token",
+                            error="注册成功但未获取到 token",
+                        )
+                    else:
+                        stats["failed"] += 1
+                        ftype = result.get("failure_type") or "unknown"
+                        stats["failure_types"][ftype] = stats["failure_types"].get(ftype, 0) + 1
+                        insert_account(
+                            email=email, password=mail["password"],
+                            client_id=mail["client_id"], refresh_token=mail["refresh_token"],
+                            openai_refresh_token=result.get("refresh_token", ""), id_token=result.get("id_token", ""),
+                            openai_password=result.get("openai_password", ""),
+                            proxy=result["proxy"], status="failed",
+                            error=result["error"],
+                        )
+                    update_task_progress(task_id, stats["completed"], stats["failed"], stats["skipped"])
 
             interval = int(self.config.get("register_interval_sec", 10))
-            if i < len(emails) - 1 and self._running:
-                add_log("info", f"等待 {interval} 秒后继续下一个...")
+            if interval > 0 and self._running:
                 await asyncio.sleep(interval)
 
+        results = await asyncio.gather(
+            *(process_one(i, mail) for i, mail in enumerate(emails)),
+            return_exceptions=True,
+        )
+        for exc in results:
+            if isinstance(exc, Exception):
+                add_log("error", f"并发注册槽异常: {exc}")
+
         self._running = False
-        task_status = "stopped" if interrupted else "completed"
+        task_status = "stopped" if stopped["flag"] else "completed"
         update_task_progress(
             task_id, stats["completed"], stats["failed"], stats["skipped"],
             status=task_status, result=json.dumps(stats, ensure_ascii=False),

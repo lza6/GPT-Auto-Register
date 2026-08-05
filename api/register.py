@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -36,6 +37,10 @@ class StartRegisterRequest(BaseModel):
 
 class RegisterControlRequest(BaseModel):
     action: str  # pause / resume / stop
+
+
+class ClearRequest(BaseModel):
+    confirm: str = ""
 
 
 @router.post("/import-emails")
@@ -114,9 +119,10 @@ async def register_status() -> dict:
 
 
 @router.get("/accounts")
-async def list_accounts(status: str = "", limit: int = 100, offset: int = 0) -> dict:
-    accounts = get_accounts(status=status, limit=limit, offset=offset)
-    return {"accounts": accounts, "total": len(accounts)}
+async def list_accounts(status: str = "", limit: int = 100, offset: int = 0, search: str = "") -> dict:
+    accounts = get_accounts(status=status, limit=limit, offset=offset, search=search)
+    total = len(get_accounts(status=status, search=search))
+    return {"accounts": accounts, "total": total}
 
 
 @router.get("/accounts/export")
@@ -126,9 +132,37 @@ async def export_accounts() -> dict:
     return {"tokens": tokens, "count": len(tokens)}
 
 
+def _backup_before_clear(conn) -> Path | None:
+    """清空前把 accounts/emails/tasks 导出为 JSON 备份，保留最近 7 份。
+
+    防止误删后无法恢复：备份落在 data/backups/backup_YYYYMMDD_HHMMSS.json。
+    """
+    from services.db import DATA_DIR
+
+    backup_dir = DATA_DIR / "backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    snapshot = {
+        "accounts": [dict(r) for r in conn.execute("SELECT * FROM accounts").fetchall()],
+        "emails": [dict(r) for r in conn.execute("SELECT * FROM emails").fetchall()],
+        "tasks": [dict(r) for r in conn.execute("SELECT * FROM tasks").fetchall()],
+    }
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    path = backup_dir / f"backup_{ts}.json"
+    path.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 保留最近 7 份，更旧的自动删除
+    for old in sorted(backup_dir.glob("backup_*.json"))[:-7]:
+        try:
+            old.unlink()
+        except Exception:
+            pass
+    return path
+
+
 @router.post("/clear")
-async def clear_data() -> dict:
-    """一键清空注册库（注册记录/邮箱池/任务），保留日志便于排查。"""
+async def clear_data(req: ClearRequest) -> dict:
+    """一键清空注册库（注册记录/邮箱池/任务）。需 confirm='clear'，清空前自动备份。"""
+    if req.confirm != "clear":
+        raise HTTPException(400, "需提供 confirm='clear' 确认后才能清空")
     config = _load_config()
     engine = get_engine(config)
     if engine.is_running:
@@ -136,7 +170,9 @@ async def clear_data() -> dict:
 
     conn = get_conn()
     deleted: dict[str, int] = {}
+    backup_path = None
     try:
+        backup_path = _backup_before_clear(conn)
         with conn:
             for table in ("accounts", "emails", "tasks"):
                 cur = conn.execute(f"DELETE FROM {table}")
@@ -144,8 +180,12 @@ async def clear_data() -> dict:
     finally:
         conn.close()
 
-    add_log("info", f"数据已清空: {deleted}")
-    return {"success": True, "deleted": deleted}
+    add_log("info", f"数据已清空: {deleted}", {"backup": str(backup_path) if backup_path else None})
+    return {
+        "success": True,
+        "deleted": deleted,
+        "backup": str(backup_path) if backup_path else None,
+    }
 
 
 # ─────────────────────────────────────────────
@@ -199,29 +239,45 @@ def _build_chatgpt2api_account(acc: dict, token_data: dict) -> dict:
     }
 
 
-def _collect_export_accounts() -> list[dict]:
-    """读取成功账号，导出为 chatgpt2api 格式。
+# 导出时 OAuth 并发刷新上限（避免大量账号时打爆 OpenAI 限流）
+_EXPORT_REFRESH_CONCURRENCY = 5
+
+
+async def _collect_export_accounts() -> list[dict]:
+    """读取成功账号，导出为 chatgpt2api 格式（并发刷新 refresh_token）。
 
     新版注册账号带有 openai_refresh_token（OAuth PKCE 获取），可刷新拿到最新三件套；
     老账号只有 access_token（标准 JWT），直接导出，有效期内可被 chatgpt2api 直接使用。
+    刷新用 asyncio.gather + Semaphore 限流，单账号失败不阻塞整体。
     """
     all_accounts = get_accounts()
-    accounts = []
+    accounts: list[dict] = []
+    to_refresh: list[tuple[dict, str]] = []
     for acc in all_accounts:
         if acc.get("status") not in ("success", "success_no_token"):
             continue
         ort = acc.get("openai_refresh_token") or ""
         at = acc.get("access_token") or ""
         if ort:
-            td = _refresh_oauth(ort)
-            if td and td["access_token"].startswith("eyJ"):
-                accounts.append(_build_chatgpt2api_account(acc, td))
+            to_refresh.append((acc, ort))
         elif at.startswith("eyJ") and len(at) > 200:
             accounts.append(_build_chatgpt2api_account(acc, {
                 "access_token": at,
                 "refresh_token": "",
                 "id_token": "",
             }))
+
+    sem = asyncio.Semaphore(_EXPORT_REFRESH_CONCURRENCY)
+
+    async def _refresh_one(pair: tuple[dict, str]) -> dict | None:
+        acc, ort = pair
+        async with sem:
+            return await asyncio.to_thread(_refresh_oauth, ort)
+
+    results = await asyncio.gather(*(_refresh_one(p) for p in to_refresh), return_exceptions=True)
+    for (acc, _ort), td in zip(to_refresh, results):
+        if isinstance(td, dict) and td.get("access_token", "").startswith("eyJ"):
+            accounts.append(_build_chatgpt2api_account(acc, td))
     return accounts
 
 
@@ -243,9 +299,9 @@ def _get_chatgpt2api_admin_key() -> str:
 
 @router.post("/export-accounts")
 async def export_accounts_chatgpt2api() -> dict:
-    """一键导出所有成功账号（刷新 token 后，chatgpt2api 格式）。"""
+    """一键导出所有成功账号（并发刷新 token 后，chatgpt2api 格式）。"""
     try:
-        accounts = _collect_export_accounts()
+        accounts = await _collect_export_accounts()
     except Exception as e:
         add_log("error", f"导出账号失败: {e}")
         return {"success": False, "error": str(e), "accounts": []}
@@ -286,7 +342,7 @@ async def export_credentials() -> dict:
 @router.post("/push-chatgpt2api")
 async def push_chatgpt2api() -> dict:
     """把成功账号（含 refresh_token）推送导入到 chatgpt2api 账号池，自动去重 + 自动刷新。"""
-    accounts = _collect_export_accounts()
+    accounts = await _collect_export_accounts()
     if not accounts:
         return {"success": False, "error": "没有可推送的账号（可能 refresh_token 全部失效）", "accounts": []}
 

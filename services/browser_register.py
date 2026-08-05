@@ -19,6 +19,19 @@ from services.graph_email_service import graph_email_service
 from services.imap_email_service import imap_email_service
 from services.name_service import name_service
 from services.proxy_service import proxy_service
+from services.browser_selectors import (
+    COOKIE_REJECT_SELECTORS,
+    EMAIL_FALLBACK,
+    EMAIL_PRIMARY,
+    NAME_FALLBACK,
+    NAME_PRIMARY,
+    NEW_PASSWORD_PRIMARY,
+    OTP_FALLBACK,
+    OTP_PRIMARY,
+    SUBMIT_FALLBACK,
+    SUBMIT_PRIMARY,
+    SWITCH_OTP_SELECTORS,
+)
 
 # OAuth PKCE 常量（与 chatgpt2api 同一 client，注册成功后可拿到 refresh_token 长期续期）
 OAUTH_CLIENT_ID = "app_2SKx67EdpoN0G6j64rFvigXD"
@@ -60,6 +73,7 @@ class BrowserRegister:
                 timeout_sec=timeout_sec,
                 poll_interval=poll_interval,
                 skip_existing=False,
+                min_age_window_sec=int(self.config.get("otp_min_age_window_sec", 120)),
             )
             if code:
                 return code
@@ -229,7 +243,7 @@ class BrowserRegister:
 
             # 先关闭 cookie 弹窗（如果有的话）
             try:
-                cookie_reject = page.locator('button:has-text("Reject optional"), button:has-text("Reject"), button:has-text("拒绝")').first
+                cookie_reject = page.locator(", ".join(COOKIE_REJECT_SELECTORS)).first
                 if await cookie_reject.count() > 0:
                     await cookie_reject.click()
                     add_log("info", f"[{email}] 已关闭 cookie 弹窗")
@@ -272,9 +286,7 @@ class BrowserRegister:
             if action == "switch_otp_login":
                 add_log("info", f"[{email}] 密码登录页，切换邮箱验证码登录...")
                 clicked = False
-                for sel in ['button:has-text("邮箱验证码")', 'button:has-text("验证码")',
-                            'a:has-text("one-time code")', 'button:has-text("one-time code")',
-                            'button:has-text("email verification")']:
+                for sel in SWITCH_OTP_SELECTORS:
                     try:
                         btn = page.locator(sel).first
                         if await btn.count():
@@ -318,13 +330,13 @@ class BrowserRegister:
                 openai_password = gen_password()
                 result["openai_password"] = openai_password
                 try:
-                    new_pw = page.locator('input[name="new-password"]')
+                    new_pw = page.locator(NEW_PASSWORD_PRIMARY)
                     await new_pw.wait_for(state="visible", timeout=10000)
                     await new_pw.click()
                     await new_pw.fill("")
                     await page.keyboard.type(openai_password, delay=30)
                     await asyncio.sleep(0.5)
-                    await page.locator('button[type="submit"]').first.click(timeout=10000)
+                    await page.locator(SUBMIT_PRIMARY).first.click(timeout=10000)
                     add_log("info", f"[{email}] ✅ 已设置 OpenAI 密码 (可账号密码登录)")
                     openai_password_set = True
                     await asyncio.sleep(3)
@@ -350,12 +362,12 @@ class BrowserRegister:
             # ── Step 2: 输入邮箱并点击继续（已设密码 / 已在后续页面则跳过）──
             if not openai_password_set and not skip_email_input:
                 add_log("info", f"[{email}] Step 2: 输入邮箱...")
-                email_input = page.locator('input[name="email"]')
+                email_input = page.locator(EMAIL_PRIMARY)
                 try:
                     await email_input.wait_for(state="visible", timeout=8000)
                 except Exception:
                     # 尝试其他选择器
-                    email_input = page.locator('input[type="email"], input[placeholder*="email" i], input[id*="email" i]').first
+                    email_input = page.locator(EMAIL_FALLBACK).first
                     try:
                         await email_input.wait_for(state="visible", timeout=8000)
                     except Exception:
@@ -373,7 +385,7 @@ class BrowserRegister:
                 await asyncio.sleep(1)
 
                 # 点击 Continue 按钮（确保按钮可见且可交互）
-                continue_btn = page.locator('button[type="submit"]')
+                continue_btn = page.locator(SUBMIT_PRIMARY)
                 try:
                     await continue_btn.wait_for(state="visible", timeout=10000)
                     await continue_btn.click(timeout=10000)
@@ -390,7 +402,7 @@ class BrowserRegister:
             elif skip_email_input:
                 add_log("info", f"[{email}] Step 3: 等待验证码输入框出现...")
                 try:
-                    otp_box = page.locator('input[name="code"], input[autocomplete="one-time-code"]').first
+                    otp_box = page.locator(OTP_PRIMARY).first
                     await otp_box.wait_for(state="visible", timeout=20000)
                 except Exception:
                     add_log("warning", f"[{email}] 验证码输入框未在 20s 内出现，继续等待邮件")
@@ -411,13 +423,13 @@ class BrowserRegister:
                             # 重试：重新输入邮箱并提交
                             add_log("info", f"[{email}] 重试提交邮箱...")
                             try:
-                                email_input2 = page.locator('input[name="email"]')
+                                email_input2 = page.locator(EMAIL_PRIMARY)
                                 await email_input2.wait_for(state="visible", timeout=10000)
                                 await email_input2.click()
                                 await email_input2.fill("")
                                 await page.keyboard.type(email, delay=50)
                                 await asyncio.sleep(0.5)
-                                continue_btn2 = page.locator('button[type="submit"]')
+                                continue_btn2 = page.locator(SUBMIT_PRIMARY)
                                 await continue_btn2.click(timeout=10000)
                             except Exception as e2:
                                 add_log("warning", f"[{email}] 重试提交异常: {e2}")
@@ -452,7 +464,7 @@ class BrowserRegister:
                     await code_input.wait_for(state="visible", timeout=10000)
                 except Exception:
                     # 兜底选择器
-                    code_input = page.locator('input[placeholder*="code" i], input[placeholder*="Code" i]').first
+                    code_input = page.locator(OTP_FALLBACK).first
                 await code_input.click()
                 await code_input.fill("")
                 await page.keyboard.type(otp_code, delay=100)
@@ -461,9 +473,9 @@ class BrowserRegister:
                 await asyncio.sleep(0.5)
 
                 # 点击 Continue 按钮提交
-                verify_btn = page.locator('button[type="submit"]').first
+                verify_btn = page.locator(SUBMIT_PRIMARY).first
                 if await verify_btn.count() == 0:
-                    verify_btn = page.locator('button:has-text("Continue"), button:has-text("Verify"), button:has-text("继续")').first
+                    verify_btn = page.locator(SUBMIT_FALLBACK).first
                 await verify_btn.click()
                 add_log("info", f"[{email}] 已提交验证码")
             else:
@@ -492,12 +504,12 @@ class BrowserRegister:
             await asyncio.sleep(2)  # 等待页面完全加载
 
             # 姓名输入框
-            name_input = page.locator('input[name="name"]')
+            name_input = page.locator(NAME_PRIMARY)
             try:
                 await name_input.wait_for(state="visible", timeout=10000)
             except Exception:
                 # 兜底选择器
-                name_input = page.locator('input[placeholder*="name" i], input[placeholder*="Name" i], input[id*="name" i]').first
+                name_input = page.locator(NAME_FALLBACK).first
                 try:
                     await name_input.wait_for(state="visible", timeout=5000)
                 except Exception:
@@ -543,7 +555,7 @@ class BrowserRegister:
             await asyncio.sleep(0.5)
 
             # 点击 "Finish creating account" 按钮
-            finish_btn = page.locator('button[type="submit"]').first
+            finish_btn = page.locator(SUBMIT_PRIMARY).first
             try:
                 await finish_btn.wait_for(state="visible", timeout=10000)
                 await finish_btn.click()
