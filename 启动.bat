@@ -1,5 +1,7 @@
 @echo off
-chcp 65001 >nul
+rem Use Windows native commands to avoid PATH hijack from Git for Windows GNU tools
+rem (GNU timeout.exe shadows System32\timeout.exe; /t arg would be eaten -> crash)
+%SystemRoot%\System32\chcp.com 65001 >nul
 setlocal EnableExtensions EnableDelayedExpansion
 cd /d "%~dp0"
 title GPT Auto Register
@@ -26,7 +28,8 @@ for /f "tokens=5" %%P in ('netstat -ano ^| findstr LISTENING ^| findstr /c:":%CF
     echo       Killing PID %%P on port %CF_PORT%
     taskkill /f /pid %%P >nul 2>nul
 )
-timeout /t 1 /nobreak >nul
+rem ping instead of timeout: immune to GNU coreutils hijack
+ping -n 2 127.0.0.1 >nul
 
 rem ---------- 1/6 Locate Python ----------
 set "PY="
@@ -109,7 +112,7 @@ rem NOTE: real install dir on Windows is %LOCALAPPDATA%\camoufox\camoufox\Cache 
 "%VENV_PY%" -c "from camoufox.pkgman import INSTALL_DIR; b=INSTALL_DIR/'browsers'; exit(0 if (b.is_dir() and list(b.iterdir())) else 1)" 2>nul
 if errorlevel 1 (
     echo       Camoufox browser data missing, installing...
-    rem 优先离线 zip（tools\camoufox\*.zip），无则在线下载，失败会打印手动下载指引
+    rem Prefer offline zip (tools\camoufox\*.zip); else online download; failure prints manual guide
     powershell -NoProfile -ExecutionPolicy Bypass -File install_camoufox.ps1
     if errorlevel 1 (
         echo [WARN] camoufox data install failed, CF verification may be unavailable
@@ -134,7 +137,7 @@ start /b "" "%VENV_PY%" cf_solver\boterdrop_wrapper.py >>logs\cf_solver.log 2>&1
 rem Poll up to 40s instead of fixed 3s (browser engine init can take a while)
 set "CF_WAIT=0"
 :cf_wait
-timeout /t 2 /nobreak >nul
+ping -n 3 127.0.0.1 >nul
 set /a CF_WAIT+=2
 netstat -ano | findstr LISTENING | findstr /c:":%CF_PORT% " >nul 2>nul
 if not errorlevel 1 goto :cf_ok
@@ -167,7 +170,7 @@ echo.
 echo [RESTART] Service exited abnormally (code %EXIT_CODE%), restarting in 3s (attempt %RESTART_COUNT%)...
 echo   To stop completely, just close this window
 echo.
-timeout /t 3 /nobreak >nul
+ping -n 4 127.0.0.1 >nul
 goto :service_loop
 
 :failed

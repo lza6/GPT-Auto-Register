@@ -1,5 +1,5 @@
 @echo off
-chcp 65001 >nul
+%SystemRoot%\System32\chcp.com 65001 >nul
 echo Stopping GPT Auto Register service...
 for /f "tokens=5" %%P in ('netstat -ano ^| findstr LISTENING ^| findstr /c:":23457 "') do (
     echo   Killing main service PID %%P
