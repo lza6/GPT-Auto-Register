@@ -103,11 +103,13 @@ class TestGetStatsAggregatedL4:
             "emails_total", "emails_pending", "emails_used",
             "accounts_total", "accounts_success", "accounts_failed",
             "accounts_skipped", "accounts_pending", "accounts_registering",
-            "last_task_failure_types",
+            "last_task_failure_types", "failure_diagnosis",
         }
         assert set(stats.keys()) == expected
         assert isinstance(stats["emails_total"], int)
         assert stats["last_task_failure_types"] == {}
+        # v3.0 A4A6：无失败时诊断建议为空串
+        assert stats["failure_diagnosis"] == ""
 
     def test_stats_counts_correct(self, isolated_db):
         db.insert_email("a@e.com", "p", "c", "r")

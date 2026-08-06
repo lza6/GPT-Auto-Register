@@ -50,6 +50,18 @@ def _resolve_auth_enforced() -> bool:
     return False
 
 
+def _resolve_token_refresh_enabled(config: dict) -> bool:
+    """读取 token_refresh_enabled：默认 false（避免与 chatgpt2api 自动刷新冲突）。
+    兼容布尔或字符串。"""
+    env = os.environ.get("GPT_REGISTER_TOKEN_REFRESH_ENABLED")
+    v = env if env is not None else config.get("token_refresh_enabled", False)
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on")
+    return bool(v)
+
+
 def _check_cf_solver() -> str:
     """探测 CF Solver (:8001) 是否 Listen。返回 ok/unknown。"""
     try:
@@ -64,13 +76,14 @@ def _check_cf_solver() -> str:
 
 
 def _get_browser_pool_size() -> int:
-    """返回当前 camoufox 浏览器实例数（未初始化 0）。"""
+    """返回当前 camoufox 浏览器池实例数（未初始化 0）。
+
+    v3.0：替代原固定返回 1 的逻辑，反映真实池大小。
+    max_size=0（未启用池化）时返回 0，保持原按需启停行为不变。
+    """
     try:
-        from services.browser_register import browser_register
-        if browser_register is None:
-            return 0
-        # 单例 BrowserRegister，无持久化池；A5 浏览器池落地后改为 len(pool)
-        return 1 if browser_register is not None else 0
+        from services.browser_pool import pool_size_for_healthz
+        return pool_size_for_healthz()
     except Exception:
         return 0
 
@@ -109,7 +122,7 @@ class AuthKeyMiddleware:
 
 def create_app() -> FastAPI:
     config = load_config()
-    app = FastAPI(title="GPT 自动注册", version="2.2.0")
+    app = FastAPI(title="GPT 自动注册", version="3.1.0")
 
     # CORS：前端由本站同源静态服务提供，仅放行本地调试源，关闭凭据通配
     app.add_middleware(
@@ -159,27 +172,72 @@ def create_app() -> FastAPI:
             "browser_pool_size": browser_pool_size,
             "auth": "enabled" if auth_key else "disabled",
             "auth_enforced": auth_enforced,
-            "version": "2.2.0",
+            "version": "3.1.0",
         }
 
     # 优雅停机：uvicorn shutdown 时关浏览器池 + CF solver
     @app.on_event("shutdown")
     async def shutdown_handler() -> None:
+        import inspect
         import logging
         log = logging.getLogger("gpt-register")
+
+        # 浏览器池清理（H3 池化后池持有持久实例；未池化时无实例可清，仅打日志）
         try:
             from services.browser_register import browser_register
             if browser_register is not None:
-                log.info("shutdown: 清理浏览器实例...")
+                # 池化后浏览器注册实例可能暴露 cleanup()；未池化时安全跳过
+                cleanup_fn = getattr(browser_register, "cleanup", None)
+                if cleanup_fn is not None:
+                    log.info("shutdown: 清理浏览器实例...")
+                    if inspect.iscoroutinefunction(cleanup_fn):
+                        await cleanup_fn()
+                    else:
+                        cleanup_fn()
+                else:
+                    log.info("shutdown: 浏览器注册为按需启停模式，无需清理持久实例")
         except Exception as e:
             log.warning(f"shutdown: 浏览器清理异常: {e}")
+
+        # CF Solver 停止：cf_solver_service.stop 是 async 方法，用 iscoroutinefunction 防御
+        # （原写法 `await x.stop() if hasattr(...) else None` 在 stop 不存在时 await None 会 crash）
         try:
             from services.cf_solver_service import cf_solver_service
             if cf_solver_service is not None:
-                log.info("shutdown: 停止 CF Solver...")
-                await cf_solver_service.stop() if hasattr(cf_solver_service, "stop") else None
+                stop_fn = getattr(cf_solver_service, "stop", None)
+                if stop_fn is not None:
+                    if inspect.iscoroutinefunction(stop_fn):
+                        await stop_fn()
+                    else:
+                        stop_fn()
+                    log.info("shutdown: CF Solver 已停止")
         except Exception as e:
             log.warning(f"shutdown: CF Solver 停止异常: {e}")
+
+        # token 巡检任务停止（v3.0 G1）
+        try:
+            from services.token_refresher import token_refresher
+            if token_refresher is not None and token_refresher.is_running:
+                log.info("shutdown: 停止 token 巡检任务...")
+                await token_refresher.stop()
+        except Exception as e:
+            log.warning(f"shutdown: token 巡检停止异常: {e}")
+
+    # token 保鲜巡检：startup 事件（async 上下文）内启动后台任务（v3.0 G1）
+    # 注意：不能在 create_app 同步执行，create_task 需 running event loop
+    token_refresh_enabled = _resolve_token_refresh_enabled(config)
+
+    @app.on_event("startup")
+    async def startup_handler() -> None:
+        import logging
+        log = logging.getLogger("gpt-register")
+        if token_refresh_enabled:
+            try:
+                from services.token_refresher import get_token_refresher
+                get_token_refresher(config).start()  # startup 内有 running loop
+                log.info("token 巡检任务已启动")
+            except Exception as e:
+                log.warning(f"token 巡检启动失败: {e}")
 
     app.include_router(register_router.router, prefix="/api/register", tags=["register"])
     app.include_router(stats_router.router, prefix="/api/stats", tags=["stats"])

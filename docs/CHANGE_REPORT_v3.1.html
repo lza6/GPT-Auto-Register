@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>v3.1 前端闭环 + bug/技术债清理变更报告</title>
+<style>
+:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#c9d1d9;--muted:#8b949e;--green:#3fb950;--red:#f85149;--yellow:#d29922;--blue:#58a6ff}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,"Segoe UI",system-ui,sans-serif;background:var(--bg);color:var(--text);line-height:1.7;padding:20px;max-width:980px;margin:0 auto}
+h1{color:var(--blue);border-bottom:1px solid var(--border);padding-bottom:10px;margin-bottom:20px;font-size:1.6em}
+h2{color:var(--green);margin:30px 0 12px;font-size:1.25em;border-left:3px solid var(--green);padding-left:10px}
+h3{color:var(--blue);margin:18px 0 8px;font-size:1.05em}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px;margin:12px 0}
+.code{background:#1f2428;border:1px solid var(--border);border-radius:4px;padding:10px;font-family:"Consolas",monospace;font-size:0.9em;overflow-x:auto;color:#e6edf3;white-space:pre-wrap;margin:8px 0}
+.tag{display:inline-block;padding:2px 8px;border-radius:12px;font-size:0.8em;font-weight:600;margin:0 4px}
+.p0{background:rgba(248,81,73,.2);color:var(--red);border:1px solid var(--red)}
+.p1{background:rgba(210,153,34,.2);color:var(--yellow);border:1px solid var(--yellow)}
+.p2{background:rgba(63,185,80,.15);color:var(--green);border:1px solid var(--green)}
+.done{color:var(--green)}
+.todo{color:var(--yellow)}
+ul{margin:10px 0 10px 24px}li{margin:4px 0}
+.quiz{background:#0d2137;border:1px solid var(--blue);border-radius:8px;padding:16px;margin:16px 0}
+.quiz q{display:block;margin:10px 0;font-weight:600}
+.quiz .ans{color:var(--muted);font-size:.9em;margin-top:6px}
+.summary-box{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:16px 0}
+.summary-box .stat{text-align:center;background:var(--card);padding:14px;border-radius:8px;border:1px solid var(--border)}
+.stat .num{font-size:1.8em;font-weight:700;color:var(--blue)}
+.stat .lbl{color:var(--muted);font-size:.85em}
+footer{margin-top:40px;padding-top:16px;border-top:1px solid var(--border);color:var(--muted);font-size:.85em}
+</style>
+</head>
+<body>
+<h1>v3.1 前端闭环 + bug/技术债清理变更报告</h1>
+<p style="color:var(--muted)">GPT 自动注册项目 · 2026-08-06 · 基于证据，非理想状态</p>
+
+<div class="summary-box">
+<div class="stat"><div class="num">14</div><div class="lbl">闭环任务</div></div>
+<div class="stat"><div class="num">253</div><div class="lbl">pytest 全绿</div></div>
+<div class="stat"><div class="num">3.1.0</div><div class="lbl">版本号</div></div>
+</div>
+
+<h2>1. 上下文与直觉</h2>
+<div class="card">
+<p>v3.0 已把大量能力落到后端（浏览器池 H3、config_schema P0、双引擎契约 B1、token 巡检 G1、代理健康 P2-4、失败分级 A4A6），但<strong>前端 app.js 几乎未接入</strong>——能力存在却不可见不可控。审计另发现 7 项 bug/技术债（含 2 项实证 P0：settings 白名单缺失致前端保存 400、settings 存字符串致 config.json 脏数据）。本轮把 v3.0 能力在前端完整闭环，并修复全部已发现 bug + 补齐治理资产。</p>
+</div>
+
+<h2>2. 做了什么</h2>
+
+<h3>阶段 A — 基础修复（P0）</h3>
+<div class="card">
+<ul>
+<li><span class="tag p0">T1</span><strong>proxies /health 冗余赋值</strong>：删除第一行两分支都调 <code>_http_url</code> 的无效三元，保留 if/else 的 kookeey/HTTP 正确分流。<span class="done">✅</span></li>
+<li><span class="tag p0">T4a</span><strong>settings 白名单扩容</strong>：<code>ALLOWED_SETTINGS_KEYS</code> 追加 <code>browser_pool_size</code>/<code>token_refresh_enabled</code>/<code>token_refresh_interval_sec</code>/<code>cf_retry_max</code>，前端保存不再 400。<span class="done">✅</span></li>
+<li><span class="tag p0">T4b</span><strong>settings 类型清源</strong>：新增 <code>_coerce_value</code> 按 <code>config_schema</code> 转型——int 键转 int、bool 键转布尔、无法识别原样留待 schema 告警。DB 仍存字符串（<code>get_setting</code> 契约不变），config.json 存正确类型。<span class="done">✅</span></li>
+<li><span class="tag p0">T5</span><strong>版本号统一 3.1.0</strong>：<code>api/__init__.py</code>×2 + <code>README.md:198</code>。<span class="done">✅</span></li>
+<li><span class="tag p2">T9</span><strong>前端拆分收尾</strong>：删 index.html 空置 <code>&lt;style&gt;</code>、app.css 残留 <code>&lt;/style&gt;</code>。<span class="done">✅</span></li>
+<li><span class="tag p2">清源</span><strong>config.json 历史脏数据</strong>：<code>register_concurrency:"true"→1</code>、<code>register_interval_sec:"15"→15</code>；并修 <code>conftest.py</code> 隔离 <code>api.settings.CONFIG_PATH</code>（此前测试污染真实 config.json，正是脏数据源头之一）。<span class="done">✅</span></li>
+</ul>
+</div>
+
+<h3>阶段 B — 前端接入（P0）</h3>
+<div class="card">
+<ul>
+<li><span class="tag p0">T2</span><strong>Token 健康仪表盘</strong>：设置页新增「🔄 Token 保鲜巡检」卡片，展示启用状态/上次巡检/扫描/刷新/失败数；未启用显示启用指引。<span class="done">✅</span></li>
+<li><span class="tag p0">T3</span><strong>代理池健康徽章</strong>：代理表新增「健康」列 + 「🩺 一键探测」工具栏 + 可用/失效汇总；失效行整行标红。<span class="done">✅</span></li>
+<li><span class="tag p0">T4</span><strong>高级设置 4 字段</strong>：<code>openAdvanced</code> 从只读改为可编辑（4 个 v3.0 字段 + 保存按钮），保留只读全量表；浏览器池项带「kookeey 动态代理池化会串 IP」醒目警告。<span class="done">✅</span></li>
+<li><span class="tag p1">T8</span><strong>失败诊断卡片化</strong>：<code>last_task_failure_types</code> 渲染为分类徽章卡片（占比 + 一句话引导），替代纯文本塞入。<span class="done">✅</span></li>
+</ul>
+</div>
+
+<h3>阶段 C — 闭环（P1）</h3>
+<div class="card">
+<ul>
+<li><span class="tag p1">T6</span><strong>浏览器池接入 register_one</strong>：<code>browser_pool_size&gt;0</code> 时 <code>pool.acquire</code>，占位实例锁外启动填充；代理按 <code>new_context</code> 隔离（browser 实例代理无关，不串 IP）；异常实例先关闭再标记占位丢弃不复用；新增 <code>cleanup()</code> 委托池清理供 shutdown 调用。<span class="done">✅ 已真实 camoufox 冒烟</span>（<code>scripts/smoke_browser_pool.py</code>）</li>
+<li><span class="tag p1">T7</span><strong>token_refresher 补代理支持</strong>：审计发现 <code>_refresh_token</code> 的 httpx 原本不走代理——注册走代理、巡检不走会致「仅代理可达 OpenAI」的部署永远失败。新增 <code>_resolve_proxy</code>（优先 <code>config.proxy_url</code>，其次代理池，兼容字符串 'true'）。<span class="done">✅ 已经真实代理连 OpenAI 端点验证</span></li>
+</ul>
+</div>
+
+<h3>阶段 D — 治理（P2）</h3>
+<div class="card">
+<ul>
+<li><span class="tag p2">T11</span><strong>治理资产</strong>：ADR-006 + 本报告 + workflow_status v3.1 段 + 记忆更新。<span class="done">✅</span></li>
+</ul>
+</div>
+
+<h2>3. 验证证据</h2>
+<div class="card">
+<ul>
+<li><strong>全量测试</strong>：<code>pytest tests/ -p no:warnings</code> → <strong>253 全绿</strong>（原 217+，新增 settings 清源 6 + proxy health 2 + 池化集成 3 + healthz 版本/静态 2）。</li>
+<li><strong>真实 uvicorn 冒烟</strong>（仅 GET）：<code>/api/healthz</code> 返回 <code>version:"3.1.0"</code>；<code>/api/stats/token-health</code> 禁用形态正确；<code>/api/proxies/health</code> 结构正确且 kookeey 行正确路由 <code>_kookeey_url</code>；<code>/</code>、<code>/app.js</code>、<code>/app.css</code> 全 200。</li>
+<li><strong>无头浏览器点遍</strong>（playwright python）5 标签页 + 高级弹窗：<strong>0 console error + 0 request failed</strong>；token 卡片/4 高级字段/代理健康列均渲染。</li>
+<li><strong>schema 校验</strong>：<code>config_schema.validate_config(config.json)</code> → 无告警（脏数据已清源）。</li>
+<li><strong>T6 真实 camoufox 冒烟</strong>（<code>scripts/smoke_browser_pool.py</code>）：同代理两次 acquire 复用同一真实实例（launch_count 恒为 1 不重启浏览器）、复用实例真实导航成功、cleanup 真实关进程 → <strong>PASS</strong>。</li>
+<li><strong>T7 真实端到端闭环</strong>（<code>scripts/smoke_token_refresh.py</code>）：用真实 OpenAI refresh_token（export 文件 23 个其一）在临时库跑真实 <code>_scan_once</code>（不 mock）→ <code>{scanned:1, refreshed:1, failed:0}</code>，access_token 从占位更新为真实新 JWT → <strong>PASS</strong>。<strong>观察</strong>：OpenAI 每次刷新返回新 refresh_token，但旧的窗口期内仍可用（复用旧 token 仍 HTTP 200）。</li>
+</ul>
+</div>
+
+<h2>4. 诚实边界（未闭环，沉淀 tasks 长尾）</h2>
+<div class="card">
+<ul>
+<li class="todo">T6 池复用已真实 camoufox 冒烟，但未跑完整 <code>register_one</code> 注册流（需真实 OpenAI 账号 + 代理，会遇 CF/取码）。</li>
+<li class="todo">T7 已真实端到端闭环；唯一未做的是「同时落库轮换后的新 refresh_token」增强——因旧 token 窗口期内仍可用，非致命，列 v3.2 观察项（YAGNI 暂不实现）。</li>
+<li class="todo">T3 代理健康仅探测 TCP 端口可达（3s），<strong>≠ 账号可用</strong>（kookeey 动态住宅端口可达仍可能账密/国家码失效）；真实 HTTP 出口探测见 v3.2。</li>
+<li class="todo">500 条代理全量探测约 150s（并发 10 × 3s），属预期耗时，非 bug。</li>
+</ul>
+</div>
+
+<h2>5. 变更测验</h2>
+<div class="quiz">
+<p>以下测验必须通过，确认你理解本次变更：</p>
+
+<q>Q1: settings 写入时，DB settings 表和 config.json 分别存什么类型？为什么这么设计？</q>
+<div class="ans">DB 存原始字符串（<code>get_setting()</code> 返回 str 的契约被 test_settings 依赖），config.json 存 <code>_coerce_value</code> 按 schema 转的正确类型。脏数据危害只在 config.json（schema 告警），DB 字符串 KV 无害且运行时 <code>_as_int</code>/<code>_as_bool</code> 兜底。</div>
+
+<q>Q2: 浏览器池化为什么不会串 IP？默认 browser_pool_size 是多少，为什么？</q>
+<div class="ans">代理在 <code>browser.new_context(proxy=...)</code> 按 context 设置，camoufox browser 实例本身代理无关；池化复用 browser + 每账号新建 context，各 context 携带各自代理。默认 <code>browser_pool_size=0</code> 不池化——kookeey 动态代理每账号本就独立 IP，池化收益主要在固定通用 HTTP 代理场景。</div>
+
+<q>Q3: register_one 池化路径中，异常发生时实例如何处理？为什么不能直接 release 复用？</q>
+<div class="ans"><code>pooled_ok=False</code>（未正常完成到 context.close()）时先 <code>browser.close()</code>+<code>camoufox.stop()</code>，再把 <code>inst.camoufox/browser</code> 置 None 标记为占位，让 <code>release</code> 走占位丢弃分支。直接复用可能损坏的实例会让后续账号反复失败，放大故障。</div>
+
+<q>Q4: token 巡检默认开启还是关闭？为什么？巡检失败会删旧 token 吗？</q>
+<div class="ans">默认关闭（<code>token_refresh_enabled=false</code>），避免与 chatgpt2api 自动刷新职责冲突导致 OpenAI 限流/吊销 refresh_token。失败仅记 log + 跳过，不删旧 token（保留可用旧值）。</div>
+
+<q>Q5: 前端拆分后用哪三重校验防"漏迁 id/class"静默失效？</q>
+<div class="ans">① <code>node --check app.js</code> 语法；② <code>getElementById</code> 引用的 id 与 index.html/弹窗注入 id 双向比对；③ 真实无头浏览器点遍标签页 + 弹窗，断言 0 console error + 0 request failed。</div>
+
+<q>Q6: /api/proxies/health 探测的是什么？能代表"代理账号可用"吗？</q>
+<div class="ans">仅探测 TCP 端口可达（3s 超时），<strong>不能</strong>代表账号可用——kookeey 动态住宅端口可达后仍可能因账密/国家码错误失效。真实 HTTP 出口探测是 v3.2 前瞻。</div>
+
+<q>Q7: T4b 把 int 字段存成 int 后，为什么 test_settings.py:41 的 <code>get_setting(...) == "15"</code> 字符串断言仍然通过？</q>
+<div class="ans">因为 <code>set_setting</code> 写入 DB 的仍是原始字符串 <code>"15"</code>（只有 config.json 存 int），<code>get_setting</code> 从 DB 读取返回 <code>"15"</code>，字符串契约未被破坏。</div>
+</div>
+
+<footer>
+<p>关联：ADR-006 · workflow_status.md v3.1 段 · 记忆 gpt-auto-register-v2-state.md</p>
+<p>本报告基于真实代码审计与真实验证（pytest + uvicorn 冒烟 + 无头浏览器），非理想状态描述。</p>
+</footer>
+</body>
+</html>
+MDEOF

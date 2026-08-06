@@ -166,6 +166,13 @@ class RegisterEngine:
         stats_lock = asyncio.Lock()
         sem = asyncio.Semaphore(concurrency)
         stopped = {"flag": False}
+        # v3.0 A4A6：失败分级自适应状态
+        # server_5xx 连续计数：连续 3 次自动暂停 60s 后恢复
+        server_5xx_streak = {"count": 0}
+        # 风控占比 >40% 触发暂停提示（不自动恢复，让用户换代理）
+        risk_pause_triggered = {"flag": False}
+        # 自适应暂停恢复任务句柄
+        auto_resume_task = {"handle": None}
 
         async def process_one(i: int, mail: dict[str, str]) -> None:
             email = mail["email"]
@@ -259,6 +266,37 @@ class RegisterEngine:
                             error=result["error"],
                         )
                     update_task_progress(task_id, stats["completed"], stats["failed"], stats["skipped"])
+
+                # v3.0 A4A6：失败分级驱动自适应
+                # 仅在 failed 分支后检查（result["status"]=="failed"）
+                if result["status"] == "failed":
+                    ftype = result.get("failure_type") or "unknown"
+                    if ftype == "server_5xx":
+                        server_5xx_streak["count"] += 1
+                        if server_5xx_streak["count"] >= 3 and not self._paused:
+                            add_log("warning", "连续 3 次 server_5xx，自动暂停 60s 后恢复...")
+                            self.pause()
+                            # 60s 后自动恢复（只触发一次）
+                            async def _auto_resume(delay: int) -> None:
+                                await asyncio.sleep(delay)
+                                if self._paused and self._running:
+                                    self.resume()
+                                    add_log("info", "server_5xx 自动暂停结束，已恢复")
+                            auto_resume_task["handle"] = asyncio.create_task(_auto_resume(60))
+                    else:
+                        server_5xx_streak["count"] = 0  # 非连续重置
+
+                    # 风控占比 >40% 触发暂停提示（不自动恢复，让用户换代理）
+                    if not risk_pause_triggered["flag"] and ftype == "risk_control":
+                        total_done = stats["completed"] + stats["failed"] + stats["skipped"]
+                        if total_done >= 5:
+                            risk_pct = stats["failure_types"].get("risk_control", 0) / total_done
+                            if risk_pct > 0.4 and not self._paused:
+                                risk_pause_triggered["flag"] = True
+                                add_log("warning",
+                                        f"风控失败占比 {risk_pct:.0%} > 40%，已暂停。"
+                                        f"建议更换代理出口 IP 后点「继续」")
+                                self.pause()
 
             interval = _as_int(self.config.get("register_interval_sec"), 10)
             if interval > 0 and self._running:

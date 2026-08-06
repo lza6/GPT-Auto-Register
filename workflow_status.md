@@ -184,3 +184,48 @@
 ### 诚实边界（未闭环，沉淀tasks长尾）
 - L5 shutdown 回调仅代码实现，未冒烟验证 uvicorn 信号真的触发
 - H3浏览器池/F前端系列/G1 token保鲜/B1双引擎统一/A4A6失败分级+并发/H1测试套件≥90% 长尾
+
+## 十一、v3.0→v3.1 前端闭环 + bug/技术债清理（2026-08-06）
+
+### 背景
+v3.0 后端能力已落地（浏览器池/schema/双引擎契约/token巡检/代理健康/失败分级），但前端 `app.js` 几乎未接入，且审计发现 7 项 bug/技术债。本轮把 v3.0 能力在前端完整闭环，并修复全部已发现 bug。
+
+### 任务闭环状态
+
+| 任务 | 状态 | 证据 |
+|------|------|------|
+| T1 proxies /health 冗余赋值 | ✅ | api/proxies.py 删无效三元，保留 if/else kookeey 分流 |
+| T4a settings 白名单扩容 4 键 | ✅ | api/settings.py ALLOWED_SETTINGS_KEYS + browser_pool_size/token_refresh_*/cf_retry_max |
+| T4b settings 类型清源 | ✅ | api/settings.py _coerce_value 按 config_schema 转型；DB 存字符串契约不变 + config.json 存正确类型 |
+| T5 版本号统一 3.1.0 | ✅ | api/__init__.py×2 + README.md:198 |
+| T9 前端拆分收尾 | ✅ | index.html 删空置 style、app.css 删残留 </style>；node --check + id 双向比对 + 无头浏览器 0 报错 |
+| T2 token 健康仪表盘 | ✅ | index.html tokenHealthCard + app.js loadTokenHealth + switchTab 钩子 |
+| T3 代理池健康徽章 | ✅ | index.html 健康列+探测工具栏 + app.js checkProxyHealth/renderProxyHealth + app.css tr.failed |
+| T4 高级设置 4 字段 | ✅ | openAdvanced 改可编辑 + saveAdvanced + 串 IP 警告 |
+| T8 失败诊断卡片化 | ✅ | renderFailureDiagnosis 分类徽章+占比+引导（last_task_failure_types） |
+| T6 浏览器池接入 register_one | ✅ 已真实冒烟 | browser_register.py 池化 acquire/release + cleanup() 委托池清理；scripts/smoke_browser_pool.py 真实 camoufox PASS |
+| T7 token_refresher 补代理支持 + 真实刷新闭环 | ✅ 已真实端到端 | _resolve_proxy 优先 config.proxy_url 次代理池；scripts/smoke_token_refresh.py 真实 _scan_once PASS(refreshed=1, 真实新JWT落库) |
+| conftest 隔离 api.settings.CONFIG_PATH | ✅ | 修测试污染真实 config.json（脏数据源头之一） |
+| config.json 历史脏数据清源 | ✅ | register_concurrency:"true"→1、register_interval_sec:"15"→15 |
+| T11 治理资产 | ✅ | ADR-006 + CHANGE_REPORT_v3.1.html + workflow_status + 记忆 |
+
+### 验证历史（v3.1，勿重复审计）
+- 全量：`./.venv/Scripts/python.exe -m pytest tests/ -p no:warnings` → **256 全绿**（原 217+，新增 settings 清源 6 + proxy health 2 + 池化集成 3 + healthz 版本/静态 2 + _resolve_proxy 3）
+- 真实 uvicorn 冒烟（端口 23461/23462，仅 GET）：healthz `version:"3.1.0"`、token-health 禁用形态正确、proxies/health 结构正确且 kookeey 正确路由、静态三文件全 200
+- 无头浏览器（playwright python）点遍 5 标签页 + 高级弹窗：**0 console error + 0 request failed**；token 卡片/4 高级字段/代理健康列均渲染
+- `config_schema.validate_config(config.json)` → 无告警
+- **T6 真实 camoufox 冒烟**：`./.venv/Scripts/python.exe scripts/smoke_browser_pool.py` → PASS（同代理复用同一真实实例，launch_count 恒为 1 不重启，cleanup 真实关进程）
+- **T7 真实刷新闭环**：`./.venv/Scripts/python.exe scripts/smoke_token_refresh.py` → PASS（真实 export 账号 refresh_token + 真实代理连 OpenAI，临时库 _scan_once 返回 {scanned:1,refreshed:1,failed:0}，access_token 更新为真实新JWT；复用旧 refresh_token 仍 HTTP 200 = 旧的窗口期内不作废）
+
+### 诚实边界（未闭环，沉淀 tasks 长尾）
+- T6 池复用已真实 camoufox 冒烟，但未跑完整 register_one 注册流（需真实 OpenAI 账号+代理，会遇 CF/取码）
+- T7 已真实端到端闭环；唯一未做的是「同时落库轮换后的新 refresh_token」增强——旧 token 窗口期内仍可用，非致命，列 v3.2 观察项（YAGNI 暂不实现）
+- T3 代理健康仅 TCP 端口可达 ≠ 账号可用；真实 HTTP 出口探测见 v3.2
+- 500 条代理全量探测约 150s（并发10×3s），预期耗时非 bug
+
+### 复现坑（v3.1 新增，勿重蹈）
+- **settings 写入要分型**：DB settings 表是字符串 KV（get_setting 契约），config.json 是启动真源（schema 校验）——只转 config.json 类型，DB 保持字符串，否则破坏 test_settings 字符串断言
+- **conftest 要隔离 api.settings.CONFIG_PATH**：settings.py 有独立模块级 CONFIG_PATH，只隔离 api/__init__.py 的不够，否则测试污染真实 config.json
+- **前端拆分三重校验**：node --check + getElementById id 双向比对 + 无头浏览器点遍——单拆不验会漏迁 id/class 静默失效
+- **浏览器池异常实例要销毁不复用**：pooled_ok=False 时先关闭再标记占位让 release 丢弃，防坏实例池内循环放大失败
+- **代理按 context 隔离**：camoufox browser 实例代理无关（代理在 new_context 设置），池化 browser 不串 IP——这是 T6 可行的关键前提

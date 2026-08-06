@@ -33,6 +33,7 @@ def client(monkeypatch, tmp_path):
 
     import services.db as db
     import api as api_init
+    import api.settings as api_settings
 
     # 隔离数据库
     monkeypatch.setattr(db, "DATA_DIR", tmp_path)
@@ -46,6 +47,8 @@ def client(monkeypatch, tmp_path):
         encoding="utf-8",
     )
     monkeypatch.setattr(api_init, "CONFIG_PATH", cfg)
+    # settings.py 有独立的 CONFIG_PATH 模块级引用，需单独隔离，否则写设置会污染真实 config.json
+    monkeypatch.setattr(api_settings, "CONFIG_PATH", cfg)
 
     from fastapi.testclient import TestClient
 

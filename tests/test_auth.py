@@ -21,6 +21,22 @@ class TestAuthMiddleware:
         assert "browser_pool_size" in body
         assert "version" in body
 
+    def test_healthz_version_is_3_1_0(self, client):
+        """v3.1 T5：版本号统一为 3.1.0（与 v3.0 能力匹配）。"""
+        body = client.get("/api/healthz").json()
+        assert body["version"] == "3.1.0"
+
+    def test_static_frontend_served(self, client):
+        """v3.1 T9：拆分后的前端三文件均可加载（无 404），且 app.css 无残留 </style>。"""
+        assert client.get("/").status_code == 200
+        js = client.get("/app.js")
+        css = client.get("/app.css")
+        assert js.status_code == 200
+        assert css.status_code == 200
+        assert "loadTokenHealth" in js.text  # T2 已接入
+        assert "checkProxyHealth" in js.text  # T3 已接入
+        assert "</style>" not in css.text  # 拆分残留已清理
+
     def test_sensitive_endpoint_requires_key(self, client):
         resp = client.get("/api/register/status")
         assert resp.status_code == 401

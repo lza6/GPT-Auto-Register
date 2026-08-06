@@ -269,3 +269,76 @@ class TestRegisterOneBranches:
         assert "验证码等待超时" in result["error"]
         # 确认确实发生了重试（resolve 被调用 ≥ 2 次）
         assert state["resolve"] >= 2, f"CF 应重试，resolve 调用 {state['resolve']} 次"
+
+
+class TestBrowserPoolIntegration:
+    """v3.1 T6：browser_pool_size>0 时 register_one 走池化 acquire/release；=0 走冷启动。"""
+
+    async def test_pool_acquire_release_called(self, isolated_db, fake_browser_env, monkeypatch):
+        import services.browser_pool as bp
+        from services.browser_pool import BrowserPool
+
+        monkeypatch.setattr(bp, "browser_pool", None)  # 重置全局池，隔离
+        pool = BrowserPool(max_size=2)
+        calls = {"acquire": 0, "release": 0}
+        orig_acquire, orig_release = pool.acquire, pool.release
+
+        async def spy_acquire(proxy_url=""):
+            calls["acquire"] += 1
+            return await orig_acquire(proxy_url)
+
+        async def spy_release(inst):
+            calls["release"] += 1
+            return await orig_release(inst)
+
+        monkeypatch.setattr(pool, "acquire", spy_acquire)
+        monkeypatch.setattr(pool, "release", spy_release)
+        monkeypatch.setattr(bp, "get_browser_pool", lambda config: pool)
+
+        reg = BrowserRegister({"browser_pool_size": 2, "otp_wait_timeout_sec": 5, "otp_poll_interval_sec": 1})
+
+        async def inputs(page):
+            return []
+
+        async def html(page):
+            return ""
+
+        monkeypatch.setattr(reg, "_collect_page_inputs", inputs)
+        monkeypatch.setattr(reg, "_page_html", html)
+        await reg.register_one("u@example.com", "p", "cid", "rt")
+        assert calls["acquire"] == 1, "池化路径应调用一次 acquire"
+        assert calls["release"] == 1, "无论成功/失败 finally 都应 release"
+
+    async def test_pool_disabled_cold_path(self, isolated_db, fake_browser_env, monkeypatch):
+        import services.browser_pool as bp
+
+        monkeypatch.setattr(bp, "browser_pool", None)
+        reg = BrowserRegister({"browser_pool_size": 0, "otp_wait_timeout_sec": 5, "otp_poll_interval_sec": 1})
+
+        async def inputs(page):
+            return []
+
+        async def html(page):
+            return ""
+
+        monkeypatch.setattr(reg, "_collect_page_inputs", inputs)
+        monkeypatch.setattr(reg, "_page_html", html)
+        await reg.register_one("u@example.com", "p", "cid", "rt")
+        assert bp.browser_pool is None, "size=0 不应创建全局池"
+
+    async def test_cleanup_delegates_to_pool(self, isolated_db, monkeypatch):
+        import services.browser_pool as bp
+        from services.browser_pool import BrowserPool
+
+        pool = BrowserPool(max_size=2)
+        cleaned = {"n": -1}
+
+        async def fake_cleanup():
+            cleaned["n"] = 1
+            return 1
+
+        monkeypatch.setattr(pool, "cleanup", fake_cleanup)
+        monkeypatch.setattr(bp, "browser_pool", pool)
+        reg = BrowserRegister({})
+        await reg.cleanup()
+        assert cleaned["n"] == 1, "cleanup 应委托到 browser_pool.cleanup()"

@@ -1,0 +1,194 @@
+"""token 保鲜巡检（G1：定期用 refresh_token 换新 access_token）。
+
+背景：access_token（OpenAI JWT）会过期；refresh_token 可长期续期。
+本项目注册成功已拿三件套，但 access_token 存库后不刷新，
+chatgpt2api 导入前若 token 已过期需手动刷新。本模块定期巡检刷新。
+
+设计：
+- 后台 asyncio 任务，每 token_refresh_interval_sec（默认 21600=6h）扫描。
+- 用 refresh_token 调 OpenAI oauth/token 换新 access_token，更新 db。
+- 并发限 5，避免 OpenAI 限流。
+- config.token_refresh_enabled 默认 false（避免与 chatgpt2api 自动刷新冲突）。
+- 失败仅记 log + 跳过，不删旧 token（保留可用旧值）。
+"""
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from typing import Any
+
+import httpx
+
+from services.constants import OAUTH_CLIENT_ID, OAUTH_TOKEN_URL, OAUTH_REDIRECT_URI
+from services.db import add_log, db_session
+
+
+class TokenRefresher:
+    """后台 token 保鲜巡检任务。"""
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        self._config = config
+        interval = config.get("token_refresh_interval_sec", 21600)
+        # 兼容字符串
+        try:
+            self._interval = max(60, int(interval))
+        except (TypeError, ValueError):
+            self._interval = 21600
+        self._concurrency = 5
+        self._task: asyncio.Task | None = None
+        self._running = False
+        self._last_scan_at: float = 0
+        self._last_result: dict[str, int] = {"scanned": 0, "refreshed": 0, "failed": 0}
+
+    @property
+    def is_running(self) -> bool:
+        return self._running
+
+    @property
+    def last_scan_at(self) -> float:
+        return self._last_scan_at
+
+    @property
+    def last_result(self) -> dict[str, int]:
+        return dict(self._last_result)
+
+    def start(self) -> None:
+        """启动后台巡检任务（幂等，重复调用安全）。"""
+        if self._task is not None and not self._task.done():
+            return
+        self._running = True
+        self._task = asyncio.create_task(self._run_loop())
+        add_log("info", f"token 巡检任务已启动，间隔 {self._interval}s")
+
+    async def stop(self) -> None:
+        """停止巡检任务。"""
+        self._running = False
+        if self._task is not None and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+        self._task = None
+        add_log("info", "token 巡检任务已停止")
+
+    async def _run_loop(self) -> None:
+        """主循环：周期扫描，异常不退出。"""
+        # 启动后等 60s 再首次扫描，避免与启动并发
+        await asyncio.sleep(60)
+        while self._running:
+            try:
+                await self._scan_once()
+            except Exception as e:
+                add_log("error", f"token 巡检异常: {e}")
+            # 分段 sleep，便于 stop 及时响应
+            slept = 0
+            while self._running and slept < self._interval:
+                await asyncio.sleep(5)
+                slept += 5
+
+    async def _scan_once(self) -> dict[str, int]:
+        """扫描所有 success 账号，刷新过期 token。"""
+        # 取所有有 refresh_token 的 success 账号
+        with db_session() as conn:
+            rows = conn.execute(
+                "SELECT email, openai_refresh_token FROM accounts "
+                "WHERE status = 'success' AND openai_refresh_token != ''"
+            ).fetchall()
+        accounts = [dict(r) for r in rows]
+        self._last_result = {"scanned": len(accounts), "refreshed": 0, "failed": 0}
+        self._last_scan_at = time.time()
+
+        if not accounts:
+            add_log("info", "token 巡检：无 success 账号可扫描")
+            return self._last_result
+
+        sem = asyncio.Semaphore(self._concurrency)
+
+        async def refresh_one(acc: dict) -> None:
+            async with sem:
+                try:
+                    new_token = await self._refresh_token(acc["openai_refresh_token"])
+                    if new_token:
+                        self._update_access_token(acc["email"], new_token)
+                        self._last_result["refreshed"] += 1
+                    else:
+                        self._last_result["failed"] += 1
+                except Exception as e:
+                    add_log("warning", f"token 巡检 [{acc['email']}] 异常: {e}")
+                    self._last_result["failed"] += 1
+
+        await asyncio.gather(*(refresh_one(a) for a in accounts))
+        add_log("info",
+                f"token 巡检完成：扫描 {self._last_result['scanned']}，"
+                f"刷新 {self._last_result['refreshed']}，失败 {self._last_result['failed']}")
+        return self._last_result
+
+    def _resolve_proxy(self) -> str | None:
+        """解析代理：优先 config.proxy_url，其次代理池（use_proxy 时）。与注册链路一致。
+
+        v3.1 T7：注册链路走代理，巡检若不走则在「OpenAI 仅能经代理可达」的部署里永远失败。
+        """
+        try:
+            proxy_url = self._config.get("proxy_url")
+            if proxy_url:
+                return proxy_url
+            use_proxy = self._config.get("use_proxy")
+            if use_proxy is True or (isinstance(use_proxy, str) and use_proxy.strip().lower() in ("1", "true", "yes", "on")):
+                from services.proxy_service import proxy_service
+                return proxy_service.get_next()
+        except Exception:
+            pass
+        return None
+
+    async def _refresh_token(self, refresh_token: str) -> str | None:
+        """用 refresh_token 换新 access_token（可被测试 monkeypatch）。走配置代理。"""
+        proxy_url = self._resolve_proxy()
+        try:
+            proxy_kwargs: dict[str, Any] = {}
+            if proxy_url:
+                proxy_kwargs["proxy"] = proxy_url
+            async with httpx.AsyncClient(timeout=30, verify=False, **proxy_kwargs) as client:
+                resp = await client.post(
+                    OAUTH_TOKEN_URL,
+                    headers={
+                        "accept": "application/json",
+                        "content-type": "application/json",
+                        "origin": "https://platform.openai.com",
+                        "referer": "https://platform.openai.com/",
+                    },
+                    json={
+                        "client_id": OAUTH_CLIENT_ID,
+                        "grant_type": "refresh_token",
+                        "refresh_token": refresh_token,
+                        "redirect_uri": OAUTH_REDIRECT_URI,
+                    },
+                )
+                data = resp.json() if resp.text else {}
+                if resp.status_code == 200 and data.get("access_token"):
+                    return data["access_token"]
+                add_log("warning", f"token 刷新失败: HTTP {resp.status_code}")
+                return None
+        except Exception as e:
+            add_log("warning", f"token 刷新异常: {e}")
+            return None
+
+    def _update_access_token(self, email: str, new_token: str) -> None:
+        """更新账号 access_token（保留旧值作 fallback 已由 REPLACE 语义覆盖）。"""
+        with db_session() as conn:
+            conn.execute(
+                "UPDATE accounts SET access_token = ? WHERE email = ?",
+                (new_token, email),
+            )
+
+
+token_refresher: TokenRefresher | None = None
+
+
+def get_token_refresher(config: dict[str, Any]) -> TokenRefresher:
+    """获取全局 token 巡检单例。"""
+    global token_refresher
+    if token_refresher is None:
+        token_refresher = TokenRefresher(config)
+    return token_refresher

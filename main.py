@@ -52,11 +52,26 @@ def load_config() -> dict:
 
 
 def _validate_config(config: dict) -> None:
-    """启动时校验关键配置，缺失/占位符打印醒目警告（不阻断启动）。"""
+    """启动时校验关键配置，缺失/占位符打印醒目警告（不阻断启动）。
+
+    v3.0：接入 services.config_schema 做结构化类型校验，
+    堵住 settings API 把数字存为字符串的脏数据源头。
+    """
+    # 1. 占位符密钥告警（原 v2.x 逻辑保留）
     auth_key = str(config.get("auth_key") or "").strip()
     if not auth_key or auth_key in ("请修改为你的管理密钥", "change-me"):
         print("[WARN] config.json 的 auth_key 未设置（占位符），/api 接口将不鉴权。生产环境请务必设置真实密钥。")
         print("      提示：设置 config.auth_enforced=true 后，占位符密钥将导致启动失败（fail-fast）。")
+
+    # 2. 结构化类型校验（v3.0 P0/P2-6）
+    try:
+        from services.config_schema import validate_config, format_issues
+        issues = validate_config(config)
+        if issues:
+            print(format_issues(issues))
+            print("      提示：数字字段建议改为 int 类型；布尔字段建议直接写 true/false。")
+    except Exception:
+        pass  # schema 模块自身异常不阻断启动
 
 
 def _purge_old_logs() -> None:

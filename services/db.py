@@ -308,7 +308,31 @@ def get_stats() -> dict:
             stats["last_task_failure_types"] = ft if isinstance(ft, dict) else {}
         except Exception:
             pass
+
+    # v3.0 A4A6：失败分级诊断建议（前端统计卡片展示）
+    stats["failure_diagnosis"] = _build_failure_diagnosis(stats["last_task_failure_types"])
     return stats
+
+
+def _build_failure_diagnosis(failure_types: dict) -> str:
+    """按失败占比最高类型给一句话引导（空则返回空串）。"""
+    if not failure_types:
+        return ""
+    total = sum(failure_types.values())
+    if total == 0:
+        return ""
+    # 找占比最高的类型
+    top_type = max(failure_types, key=lambda k: failure_types.get(k, 0))
+    top_count = failure_types.get(top_type, 0)
+    top_pct = top_count / total
+    hints = {
+        "risk_control": f"⚠️ 风控失败占比 {top_pct:.0%}（{top_count}/{total}），建议更换代理出口 IP",
+        "otp_timeout": f"⏱️ 验证码超时占比 {top_pct:.0%}（{top_count}/{total}），建议检查邮件 API 或延长 otp_wait_timeout_sec",
+        "network": f"🌐 网络失败占比 {top_pct:.0%}（{top_count}/{total}），建议检查代理可用性与 email_api_base",
+        "server_5xx": f"🔥 服务器 5xx 占比 {top_pct:.0%}（{top_count}/{total}），OpenAI 服务抖动，稍后重试",
+        "unknown": f"❓ 未知失败占比 {top_pct:.0%}（{top_count}/{total}），查看运行日志定位",
+    }
+    return hints.get(top_type, f"失败占比最高：{top_type} {top_pct:.0%}")
 
 
 def get_setting(key: str, default: str = "") -> str:

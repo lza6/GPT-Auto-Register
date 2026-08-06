@@ -221,14 +221,38 @@ class BrowserRegister:
 
         camoufox = None
         browser = None
+        # v3.1 T6：浏览器池复用（仅 config.browser_pool_size>0 时启用；kookeey 动态代理默认 0 不池化防串 IP）。
+        # 代理按 new_context 设置、browser 实例本身代理无关，池化 browser + 每账号新建 context 不会串 IP。
+        from services.browser_pool import get_browser_pool
+        pool = get_browser_pool(self.config)
+        pooled_inst = None
+        pooled_ok = False
         try:
             add_log("info", f"[{email}] 启动浏览器...")
-            camoufox = AsyncCamoufox(
-                headless=True,
-                exclude_addons=[DefaultAddons.UBO],
-                args=["--no-sandbox", "--disable-setuid-sandbox"],
-            )
-            browser = await camoufox.start()
+            if pool is not None:
+                pooled_inst = await pool.acquire(proxy_url or "")
+            if pooled_inst is not None:
+                if pooled_inst.camoufox is None:
+                    # 占位实例：锁外填充（camoufox 启动慢），启动后存入池实例供后续复用
+                    pooled_inst.camoufox = AsyncCamoufox(
+                        headless=True,
+                        exclude_addons=[DefaultAddons.UBO],
+                        args=["--no-sandbox", "--disable-setuid-sandbox"],
+                    )
+                    pooled_inst.browser = await pooled_inst.camoufox.start()
+                    add_log("info", f"[{email}] 浏览器池：新实例已启动并入池")
+                else:
+                    add_log("info", f"[{email}] 浏览器池：复用已启动实例")
+                camoufox = pooled_inst.camoufox
+                browser = pooled_inst.browser
+            else:
+                # 冷启动（默认路径：未池化，或池满 acquire 超时兜底）
+                camoufox = AsyncCamoufox(
+                    headless=True,
+                    exclude_addons=[DefaultAddons.UBO],
+                    args=["--no-sandbox", "--disable-setuid-sandbox"],
+                )
+                browser = await camoufox.start()
 
             # 设置代理
             context_kwargs: dict[str, Any] = {}
@@ -683,23 +707,58 @@ class BrowserRegister:
 
             await page.close()
             await context.close()
+            pooled_ok = True  # 正常完成：实例健康，可归还池复用
 
         except Exception as e:
             result["error"] = f"浏览器注册异常: {e}"
             add_log("error", f"[{email}] 异常: {e}")
         finally:
-            if browser:
-                try:
-                    await browser.close()
-                except Exception:
-                    pass
-            if camoufox:
-                try:
-                    await camoufox.stop()
-                except Exception:
-                    pass
+            if pooled_inst is not None:
+                if pooled_ok:
+                    await pool.release(pooled_inst)  # 正常归还，供下次复用
+                else:
+                    # 异常：实例可能已损坏，先关闭再标记为占位让 release 丢弃（不复用坏实例）
+                    if browser:
+                        try:
+                            await browser.close()
+                        except Exception:
+                            pass
+                    if camoufox:
+                        try:
+                            await camoufox.stop()
+                        except Exception:
+                            pass
+                    pooled_inst.camoufox = None
+                    pooled_inst.browser = None
+                    await pool.release(pooled_inst)  # camoufox=None → release 走占位丢弃分支
+            else:
+                # 冷启动路径：用完即关
+                if browser:
+                    try:
+                        await browser.close()
+                    except Exception:
+                        pass
+                if camoufox:
+                    try:
+                        await camoufox.stop()
+                    except Exception:
+                        pass
 
         return result
+
+    async def cleanup(self) -> None:
+        """优雅停机：清理浏览器池持有的持久实例（v3.1 T6）。未池化时无操作。
+
+        api/__init__.py 的 shutdown_handler 通过 getattr(browser_register, "cleanup") 调用。
+        """
+        try:
+            from services.browser_pool import browser_pool
+            if browser_pool is not None:
+                n = await browser_pool.cleanup()
+                if n:
+                    add_log("info", f"浏览器池已清理 {n} 个持久实例")
+        except Exception as e:
+            add_log("warning", f"浏览器池清理异常: {e}")
 
     async def _wait_for_oauth_code(self, page: Any, timeout: int = 45) -> str:
         """轮询页面 URL，等待 OAuth authorize 重定向到 redirect_uri 并携带 code"""

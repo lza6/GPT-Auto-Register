@@ -35,7 +35,37 @@ ALLOWED_SETTINGS_KEYS = {
     "email_api_base",
     "user_agent",
     "auth_enforced",
+    # v3.0 新增（T4 配套）：浏览器池 / token 巡检 / CF 重试
+    "browser_pool_size",
+    "token_refresh_enabled",
+    "token_refresh_interval_sec",
+    "cf_retry_max",
 }
+
+
+def _coerce_value(key: str, value: str):
+    """按 config_schema 把字符串值转为正确类型，供写入 config.json（消除脏数据告警）。
+
+    仅转换能可靠识别的值：int 键收纯数字字符串转 int；bool 键收 true/false 等转布尔。
+    无法识别的原样返回（交给 config_schema warn-only 校验提示，不静默吞）。
+    DB settings 表仍存原始字符串（get_setting 返回 str 的契约不变）。
+    """
+    try:
+        from services.config_schema import _CONFIG_SCHEMA
+        if key in _CONFIG_SCHEMA:
+            expected = _CONFIG_SCHEMA[key][0]  # 期望类型元组
+            sval = str(value).strip()
+            if int in expected and sval.lstrip("-").isdigit():
+                return int(sval)
+            if bool in expected:
+                low = sval.lower()
+                if low in ("1", "true", "yes", "on"):
+                    return True
+                if low in ("0", "false", "no", "off"):
+                    return False
+    except Exception:
+        pass
+    return value
 
 
 def _mask_sensitive(config: dict) -> dict:
@@ -69,11 +99,11 @@ async def update_setting(req: SettingsUpdateRequest) -> dict:
     if key not in ALLOWED_SETTINGS_KEYS:
         raise HTTPException(400, f"不允许修改的配置项: {key}")
     set_setting(key, req.value)
-    # 同步更新 config.json
+    # 同步更新 config.json（按 config_schema 转为正确类型，避免 int/bool 被存成字符串触发告警）
     config = {}
     if CONFIG_PATH.exists():
         config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    config[key] = req.value
+    config[key] = _coerce_value(key, req.value)
     CONFIG_PATH.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
     return {"success": True}
 

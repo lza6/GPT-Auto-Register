@@ -195,7 +195,7 @@ GPT-Auto-Register/
 6. **健康检查**：部署探活用 `GET /api/healthz`（无需鉴权），返回 `db/cf_solver/browser_pool_size/version/auth` 状态。
    ```bash
    curl http://localhost:23457/api/healthz
-   # {"status":"ok","db":"ok","cf_solver":"ok","browser_pool_size":0,"auth":"enabled","version":"2.2.0"}
+   # {"status":"ok","db":"ok","cf_solver":"ok","browser_pool_size":0,"auth":"enabled","version":"3.1.0"}
    ```
    - `cf_solver=unknown` 表示 CF Solver(:8001) 未启动，注册遇 CF 挑战时会降级 `cf_blocked`。
    - `browser_pool_size` 为 0 正常（camoufox 按需启动，A5 浏览器池落地后改持久池）。

@@ -61,3 +61,28 @@ class TestProxiesApi:
         resp = client.post("/api/proxies/", json={"content": "5.6.7.8:8080\n"}, headers=HDR)
         assert resp.status_code == 200
         assert f.read_text(encoding="utf-8") == "5.6.7.8:8080\n"
+
+    def test_proxies_health_unreachable(self, client, tmp_path, monkeypatch):
+        """v3.1 T1：/proxies/health 对不可达代理返回结构化失败（127.0.0.1:1 端口必然拒绝）。"""
+        f = tmp_path / "proxies.txt"
+        f.write_text("127.0.0.1:1\n# 注释\n\n", encoding="utf-8")
+        monkeypatch.setattr(proxies_mod, "PROXY_FILE", f)
+        resp = client.get("/api/proxies/health", headers=HDR)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total"] == 1  # 注释/空行不计
+        assert body["ok"] == 0
+        assert body["failed"] == 1
+        assert body["results"][0]["ok"] is False
+        assert body["results"][0]["error"]  # 有错误描述
+
+    def test_proxies_health_bad_line_no_crash(self, client, tmp_path, monkeypatch):
+        """v3.1 T1：非法代理行不崩溃，返回解析失败。"""
+        f = tmp_path / "proxies.txt"
+        f.write_text("not-a-proxy\n", encoding="utf-8")
+        monkeypatch.setattr(proxies_mod, "PROXY_FILE", f)
+        resp = client.get("/api/proxies/health", headers=HDR)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total"] == 1
+        assert body["results"][0]["ok"] is False
