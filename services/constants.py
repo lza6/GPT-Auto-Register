@@ -17,5 +17,17 @@ OAUTH_ISSUER = "https://auth.openai.com"
 OAUTH_TOKEN_URL = "https://auth.openai.com/api/accounts/oauth/token"
 OAUTH_AUTHORIZE_URL = "https://auth.openai.com/api/accounts/authorize"
 
-# chatgpt2api 默认地址（可被 config 覆盖）
-CHATGPT2API_DEFAULT_URL = "http://localhost:8787"
+
+def tls_verify_enabled(config: dict) -> bool:
+    """TLS 证书校验开关（默认 true）。
+
+    v3.1 安全审计：原各 OpenAI 出站请求全局 verify=False，携带 refresh_token/账号密码/
+    OAuth code 经第三方代理时有 MITM 风险。实测经本地/CONNECT 隧道代理 verify=True 可用
+    （不中断端到端 TLS），故默认开启；若部署代理做 SSL 拦截导致证书错误，设 tls_verify=false 回退。
+    """
+    v = config.get("tls_verify", True)
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on")
+    return bool(v)

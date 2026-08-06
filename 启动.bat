@@ -84,6 +84,21 @@ if errorlevel 1 (
 set "VENV_PY=.venv\Scripts\python.exe"
 echo       Virtual env ready
 
+rem ---------- Resolve port from config.json (v3.1: config.json port takes precedence) ----------
+rem Old hardcoded GPT_REGISTER_PORT=23457 made config.json port useless (env overrides config).
+rem NOTE: cannot use "for /f ('python -c ...')" here - parens in python break for/f parsing in cmd.
+rem So python writes the port to a temp file and "set /p" reads it (reliable, no for/f).
+if exist "config.json" (
+    "%VENV_PY%" -c "import json;open('_port_tmp.txt','w').write(str(json.load(open('config.json',encoding='utf-8')).get('port',%APP_PORT%)))" 2>nul
+    if exist "_port_tmp.txt" (
+        set /p APP_PORT=<_port_tmp.txt
+        del "_port_tmp.txt"
+    )
+)
+set "GPT_REGISTER_PORT=%APP_PORT%"
+rem Clean leftover on the resolved port (covers custom-port leftovers missed by the early default-port pass)
+for /f "tokens=5" %%P in ('netstat -ano ^| findstr LISTENING ^| findstr /c:":%APP_PORT% "') do taskkill /f /pid %%P >nul 2>nul
+
 rem ---------- 3/6 Install dependencies ----------
 echo [3/6] Installing dependencies...
 "%VENV_PY%" -m pip install --quiet --upgrade pip 2>nul

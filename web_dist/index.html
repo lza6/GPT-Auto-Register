@@ -63,7 +63,7 @@
   <!-- 注册记录 -->
   <div class="tab-content active" id="tab-accounts">
     <div class="panel">
-      <h2>注册记录 <button class="btn btn-ghost btn-sm" onclick="loadAccounts()">刷新</button>
+      <h2>注册记录 <button class="btn btn-ghost btn-sm" onclick="loadAccounts(true)">刷新</button>
         <button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="loadAccounts()">共 <span id="accCount">0</span> 条</button>
       </h2>
       <div class="controls" style="margin-bottom:12px">
@@ -93,7 +93,7 @@
   <!-- 邮箱池 -->
   <div class="tab-content" id="tab-emails">
     <div class="panel">
-      <h2>邮箱池 <button class="btn btn-ghost btn-sm" onclick="loadEmails()">刷新</button>
+      <h2>邮箱池 <button class="btn btn-ghost btn-sm" onclick="loadEmails(true)">刷新</button>
         <button class="btn btn-primary btn-sm" onclick="openManualAdd()">✍️ 手动添加</button>
         <button class="btn btn-danger btn-sm" onclick="clearEmails()" style="margin-left:auto">清空邮箱池</button>
       </h2>
@@ -122,7 +122,7 @@
   <!-- 代理池 -->
   <div class="tab-content" id="tab-proxies">
     <div class="panel">
-      <h2>代理池 <button class="btn btn-ghost btn-sm" onclick="loadProxies()">刷新</button>
+      <h2>代理池 <button class="btn btn-ghost btn-sm" onclick="loadProxies(true)">刷新</button>
         <button class="btn btn-primary btn-sm" onclick="openProxyEditor()" style="margin-left:auto">✏️ 编辑代理池</button>
       </h2>
       <div class="hint">
@@ -164,7 +164,7 @@
         <div class="form-group"><label>注册间隔 (秒)</label><input type="number" id="cfgInterval" value="10" min="1"></div>
       </div>
       <div class="form-row">
-        <div class="form-group"><label>验证码等待超时 (秒)</label><input type="number" id="cfgOtpTimeout" value="120" min="30"></div>
+        <div class="form-group"><label>验证码等待超时 (秒)</label><input type="number" id="cfgOtpTimeout" value="600" min="30"></div>
         <div class="form-group"><label>批量数量 (0=全部)</label><input type="number" id="cfgBatchSize" value="100" min="0"></div>
       </div>
       <div class="form-row">

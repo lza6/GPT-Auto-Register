@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>v3.1.1 终局闭环总审计变更报告</title>
+<style>
+:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#c9d1d9;--muted:#8b949e;--green:#3fb950;--red:#f85149;--yellow:#d29922;--blue:#58a6ff}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,"Segoe UI",system-ui,sans-serif;background:var(--bg);color:var(--text);line-height:1.7;padding:20px;max-width:980px;margin:0 auto}
+h1{color:var(--blue);border-bottom:1px solid var(--border);padding-bottom:10px;margin-bottom:20px;font-size:1.6em}
+h2{color:var(--green);margin:30px 0 12px;font-size:1.25em;border-left:3px solid var(--green);padding-left:10px}
+h3{color:var(--blue);margin:18px 0 8px;font-size:1.05em}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px;margin:12px 0}
+.code{background:#1f2428;border:1px solid var(--border);border-radius:4px;padding:10px;font-family:"Consolas",monospace;font-size:0.9em;overflow-x:auto;color:#e6edf3;white-space:pre-wrap;margin:8px 0}
+.tag{display:inline-block;padding:2px 8px;border-radius:12px;font-size:0.8em;font-weight:600;margin:0 4px}
+.p0{background:rgba(248,81,73,.2);color:var(--red);border:1px solid var(--red)}
+.p1{background:rgba(210,153,34,.2);color:var(--yellow);border:1px solid var(--yellow)}
+.p2{background:rgba(63,185,80,.15);color:var(--green);border:1px solid var(--green)}
+.done{color:var(--green)}
+.todo{color:var(--yellow)}
+ul{margin:10px 0 10px 24px}li{margin:4px 0}
+table{width:100%;border-collapse:collapse;font-size:.9em;margin:10px 0}
+th,td{padding:7px 10px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top}
+th{color:var(--muted);font-weight:600}
+.quiz{background:#0d2137;border:1px solid var(--blue);border-radius:8px;padding:16px;margin:16px 0}
+.quiz q{display:block;margin:10px 0;font-weight:600}
+.quiz .ans{color:var(--muted);font-size:.9em;margin-top:6px}
+.summary-box{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:16px 0}
+.summary-box .stat{text-align:center;background:var(--card);padding:14px;border-radius:8px;border:1px solid var(--border)}
+.stat .num{font-size:1.8em;font-weight:700;color:var(--blue)}
+.stat .lbl{color:var(--muted);font-size:.85em}
+footer{margin-top:40px;padding-top:16px;border-top:1px solid var(--border);color:var(--muted);font-size:.85em}
+</style>
+</head>
+<body>
+<h1>v3.1.1 终局闭环总审计变更报告</h1>
+<p style="color:var(--muted)">GPT 自动注册项目 · 2026-08-06 · 多代理 7 维并行审计 + 对抗验证 + 批判性复审循环 · 基于证据，非理想状态</p>
+
+<div class="summary-box">
+<div class="stat"><div class="num">80</div><div class="lbl">原始审计发现</div></div>
+<div class="stat"><div class="num">12</div><div class="lbl">P0/P1 对抗验证</div></div>
+<div class="stat"><div class="num">259</div><div class="lbl">pytest 全绿</div></div>
+<div class="stat"><div class="num">3.1.1</div><div class="lbl">版本号</div></div>
+</div>
+
+<h2>1. 上下文与直觉</h2>
+<div class="card">
+<p>v3.1 发布后，用户要求一次<strong>最严格的终局闭环总审计</strong>：把整个项目当作"即将被真实用户/调用方/部署者使用"的产品，全面查漏补缺。本轮用 <strong>7 维并行子代理审计</strong>（API契约/前端UI/后端逻辑/数据SQL/配置部署/安全/文档一致性）产出 80 条原始发现，再对 P0/P1 做<strong>对抗验证</strong>（怀疑者逐条反驳），最后用<strong>批判性审查线程</strong>（有罪推定/零容忍）复审修复并循环复验。</p>
+<p>最有价值的产出不是"又修了几个点"，而是通过<strong>真实测试</strong>挖出两个潜伏多年、被 mock 测试和浏览器兜底掩盖的<strong>生产级 bug</strong>（PKCE 错配、refresh_token 轮换不落库），并纠正了一条过时的记忆认知。</p>
+</div>
+
+<h2>2. 最强自我反驳（先攻击自己）</h2>
+<div class="card">
+<ul>
+<li><strong>"协议注册一直很正常"是错觉</strong>：PKCE verifier/challenge 错配导致换 token 必失败，但 fallback_browser 让浏览器兜底成功，表面看"协议优先"在正常跑。mock 测试 mock 了 _exchange_code，从没测到真实配对。<em>→ 实证 sha256(verifier)!=challenge，确认 P0。</em></li>
+<li><strong>"token 巡检已闭环"其实埋了耗尽雷</strong>：v3.1 记忆写"旧 RT 窗口期不作废"，本轮实测发现那是窗口期前 1-2 次；用 2-3 次后 OpenAI 返回 401 refresh_token_reused。token_refresher 只存 access_token 会让库存 RT 逐步耗尽。<em>→ 真实账号实测确认，升级为 P0/P1 修复。</em></li>
+<li><strong>"README 说前端填 auth_key"是伪功能</strong>：前端全文无 X-Auth-Key 机制，开鉴权后 Web 控制台全 401 变砖。<em>→ 补 401 弹窗收集 + playwright 实测。</em></li>
+<li><strong>"bat 读 config 端口"第一版是伪修复</strong>：for /f 解析 python 时遇 `)` 提前闭合，静默失败。批判审查员抓到，改用 set /p 实测通过。<em>→ 我自己引入了伪落地，被复审抓获。</em></li>
+<li><strong>"root logger 设 DEBUG 是善举"实则泄密</strong>：httpx DEBUG 会把携带 refresh_token/密码的请求头+body 写进 server.log。<em>→ 复审抓获，改 root=INFO + 压 httpx。</em></li>
+</ul>
+</div>
+
+<h2>3. 做了什么（P0/P1 核心修复）</h2>
+<div class="card">
+<table>
+<tr><th>#</th><th>问题</th><th>级别</th><th>修复</th><th>验证证据</th></tr>
+<tr><td>1</td><td>protocol_register PKCE verifier/challenge 错配</td><td><span class="tag p0">P0</span></td><td>_build_authorize_url(email,challenge) 共用同一对</td><td class="done">实证 sha256(v)!=c→False + 回归测试</td></tr>
+<tr><td>2</td><td>token_refresher 丢弃轮换新 RT，库存 RT 逐步耗尽</td><td><span class="tag p0">P0</span></td><td>_refresh_token 返回三件套 + _update_tokens 落库新 RT</td><td class="done">真实账号实测：新 AT+新 RT 均落库</td></tr>
+<tr><td>3</td><td>导出刷新不写回新 RT（反复导出耗尽）</td><td><span class="tag p1">P1</span></td><td>_writeback_rotated_tokens 写回</td><td class="done">导出测试全绿</td></tr>
+<tr><td>4</td><td>前端无 X-Auth-Key（开鉴权 Web 变砖）</td><td><span class="tag p1">P1</span></td><td>localStorage + 401 弹窗收集 + 重试</td><td class="done">playwright 实测 401→弹窗→恢复</td></tr>
+<tr><td>5</td><td>register_interval_sec sleep 在 sem 外（不限速）</td><td><span class="tag p1">P1</span></td><td>移入 sem 内 + 分段 sleep 响应 stop</td><td class="done">回归测试间隔语义</td></tr>
+<tr><td>6</td><td>_stop_requested stop 后残留（下次 start 静默中止）</td><td><span class="tag p1">P1</span></td><td>try_start 清陈旧标志</td><td class="done">回归测试 stop→start</td></tr>
+<tr><td>7</td><td>TLS verify=False（凭据走第三方代理 MITM 风险）</td><td><span class="tag p1">P1</span></td><td>tls_verify_enabled(config) 默认 true + 兜底</td><td class="done">实测 verify=True 经代理刷新成功</td></tr>
+<tr><td>8</td><td>导出 _refresh_oauth 不走代理 + 失败静默</td><td><span class="tag p1">P1</span></td><td>_resolve_refresh_proxy + add_log</td><td class="done">导出测试全绿</td></tr>
+</table>
+</div>
+
+<h3>P2 修复（精选）</h3>
+<div class="card">
+<ul>
+<li><strong>bat 端口</strong>：启动/停止.bat 强制 GPT_REGISTER_PORT=23457 覆盖 config.json → 改为读 config.json（set/p 方案，os.startfile 实测读到自定义端口 23499；纯 ASCII 过 ADR-004 字节检查）。</li>
+<li><strong>安全日志脱敏</strong>：graph OTP 明文、91kami 取货 URL/token 明文 → 全部脱敏。</li>
+<li><strong>root logger</strong>：只设 handler 级别丢 INFO/DEBUG → 但 root 拉 DEBUG 会泄密 → 折中：gpt-register=DEBUG、root=INFO、压 httpx 等到 WARNING。</li>
+<li><strong>数据</strong>：insert_email 唯一冲突误报成功 → rowcount 校验；emails/accounts 列表 limit 无界 → 收敛安全范围（防全表明文凭据拉取）。</li>
+<li><strong>后端健壮</strong>：run_batch 加 try/finally 复位 _running（防异常后永久"已在运行中"）。</li>
+<li><strong>前端 UX</strong>：startRegister 防重复+立即收敛；日志 DOM 上限 1500；分页越界自愈；手动刷新失败 toast；openAdvanced 值属性数字强转防 XSS。</li>
+<li><strong>配置一致性</strong>：config.example 补 4 个 v3.0 键 + tls_verify；schema browser_pool_size 默认 2→0；otp_min_age 默认 8→120（对齐文档）；otp_wait_timeout 三方分裂统一 600。</li>
+<li><strong>死代码</strong>：CHATGPT2API_DEFAULT_URL 死常量删除；register_engine 死属性 otp_timeout/otp_poll 删除。</li>
+<li><strong>文档</strong>：cf_solver/README.md 印尼语原文重写为本项目适配版（端口 8001、正确集成）；README 功能/配置/目录结构/版本同步 v3.x。</li>
+</ul>
+</div>
+
+<h2>4. 验证结果</h2>
+<div class="card">
+<ul>
+<li><strong>全量测试</strong>：<code>pytest tests/ -p no:warnings</code> → <strong>259 全绿</strong>（含新增 PKCE 配对/stop-start/interval 间隔/RT 轮换落库等回归测试）。</li>
+<li><strong>真实端到端（非 mock）</strong>：真实 OpenAI refresh_token 经代理（127.0.0.1:10808）刷新成功并落库新 RT；verify=True 经代理刷新成功。</li>
+<li><strong>前端真实浏览器</strong>（playwright）：401 鉴权弹窗→输密钥→localStorage→恢复全链路 PASS；标签页/高级设置/代理健康列渲染 0 console error。</li>
+<li><strong>bat 真实双击</strong>（os.startfile）：config port=23499 时正确读出 23499；纯 ASCII 字节检查 0。</li>
+<li><strong>批判性复审</strong>：独立审查线程判决 <strong>Approve</strong>（全部 Critical/High/Required 经实证确认真实落地，无残留）。</li>
+<li><strong>启动冒烟</strong>：uvicorn 起来 healthz 返回 3.1.1，无 schema 告警。</li>
+</ul>
+</div>
+
+<h2>5. 剩余真实风险与边界（诚实）</h2>
+<div class="card">
+<ul>
+<li class="todo"><strong>P0 待用户决策</strong>：生产实例当前无鉴权裸奔（config.json auth_key 占位符 + auth_enforced=false + host=0.0.0.0）。代码已有 fail-fast 机制，<strong>这是部署决策</strong>——需用户设真实 auth_key + auth_enforced=true。已在本报告与 README 显著标注。</li>
+<li class="todo">PKCE/RT 轮换修复经真实 token 验证，但未跑<strong>完整真实注册流</strong>（需真实 OpenAI 账号+代理遇 CF/取码），协议注册端到端成功率的提升幅度需生产观察。</li>
+<li class="todo">代理健康仅 TCP 可达 ≠ 账号可用；真实 HTTP 出口探测列 v3.2。</li>
+<li class="todo">settings 保存后运行时不生效（get_engine 单例缓存 config）需重启——已诚实标注，P2 长尾。</li>
+<li class="todo">实测用掉 2 个真实账号的 RT 链（dbf/xww）做验证——RT 已轮换，这 2 个账号的旧 RT 失效属预期。</li>
+</ul>
+</div>
+
+<h2>6. 本轮不适用的项（说明而非忽略）</h2>
+<div class="card">
+<ul>
+<li><strong>高并发基础设施</strong>（Load Balancer/Redis/Kafka/Sharding/消息队列/熔断）：本项目是单机注册工具，非多租户高并发 SaaS，引入这些属过度工程（违 YAGNI + 宪法增量迭代）。已具备的是：Semaphore 并发限流、SQLite WAL、连接管理、健康检查、日志容量上限。</li>
+<li><strong>CDN/数据库复制</strong>：单文件 SQLite + 本地静态前端，无此需求。</li>
+</ul>
+</div>
+
+<h2>7. 变更测验</h2>
+<div class="quiz">
+<p>以下测验必须通过，确认你理解本次终局审计：</p>
+
+<q>Q1: protocol_register 的 PKCE bug 是什么？为什么多年没被发现？怎么修的？</q>
+<div class="ans">_build_authorize_url 与 _register_sync 各自调用 _gen_pkce() 生成不同对，authorize 上报的 challenge 与换 token 用的 verifier 不配对（sha256(verifier)!=challenge），OpenAI 换 token 必失败。没被发现因为：①测试 mock 了 _exchange_code 从没测真实配对；②fallback_browser 让浏览器兜底成功掩盖。修法：_register_sync 生成同一对 verifier+challenge，challenge 传入 _build_authorize_url，verifier 传 _exchange_code。</div>
+
+<q>Q2: OpenAI refresh_token 轮换有什么坑？token_refresher 原来的 bug 是什么？</q>
+<div class="ans">OpenAI 每次刷新返回新 refresh_token，且旧 RT 重用 2-3 次后返回 401 refresh_token_reused 作废。原 token_refresher 只存 access_token、丢弃新 RT，导致库存 RT 逐步落后直至耗尽失效。修复：_refresh_token 返回完整三件套，_update_tokens 同时落库新 access_token 和新 refresh_token。导出路径同样补 _writeback_rotated_tokens。</div>
+
+<q>Q3: 为什么"README 说前端设置页填 auth_key"曾被称为伪功能？怎么修的？</q>
+<div class="ans">前端 app.js 的 api() 只设 Content-Type、全文无 X-Auth-Key 注入、index.html 无密钥输入框——开鉴权后 Web 控制台所有 /api/* 立即 401 变砖，与 README 宣称矛盾。修复：api() 从 localStorage 读密钥注入 X-Auth-Key，收到 401 弹窗收集一次并重试，密钥错误自动清除。</div>
+
+<q>Q4: 我把 register_interval_sec 的 sleep 从 sem 外移入 sem 内，为什么？原来在 sem 外有什么问题？</q>
+<div class="ans">sem 外时协程先释放信号量再 sleep，排队的下一个协程立即获得槽位启动注册——任意并发度（含 concurrency=1）下相邻注册启动间隔≈0，限速配置完全失效。移入 sem 内后槽位持有信号量走 interval，才真正间隔下一次启动。另补分段 sleep（0.5s 粒度查 _running）让 stop 在 interval 期间也能及时响应。</q></div>
+
+<q>Q5: 改 .bat 读 config.json 端口时，for /f 为什么会静默失败？正确做法是什么？</q>
+<div class="ans">for /f 用 ( ) 作命令串分隔符，python 代码里的 )（如 open(...) / print(...)）会提前闭合 for 命令串导致静默失败（2^>nul 吞掉错误）——与单引号/中文路径无关。正确做法：python 把端口直写临时文件，用 set /p VAR=<file 读取（完全绕开 for /f）。os.startfile 双击实测读到自定义端口 23499。</div>
+
+<q>Q6: root logger 为什么不能设为 DEBUG？正确的日志级别策略是什么？</q>
+<div class="ans">root 设 DEBUG 会让 httpx/asyncio/playwright 输出 DEBUG，其中 httpx DEBUG 打印完整请求头和 body——本项目出站请求携带 refresh_token/邮箱密码/OAuth code，等于把机密明文写进 server.log。正确：仅业务 logger gpt-register 设 DEBUG，root 保持 INFO，并显式压 httpx/httpcore/urllib3/playwright/asyncio 到 WARNING。</div>
+
+<q>Q7: 本轮 TLS verify=False 为什么能安全改成 verify=True？万一某部署的代理做 SSL 拦截怎么办？</q>
+<div class="ans">实测 verify=True 经代理可用（httpx 403/curl_cffi 200 都说明证书校验通过）——CONNECT 隧道代理（kookeey/v2ray）不中断端到端 TLS，当初设 False 是过度谨慎。若部署代理做 SSL 拦截导致证书错误，设 config.tls_verify=false 回退（config_schema 已留位，默认 true）。</div>
+</div>
+
+<footer>
+<p>关联：ADR-006 · workflow_status.md 十三段（完整审计清单）· 记忆 gpt-auto-register-v2-state.md（含纠正的过时认知）</p>
+<p>本报告基于多代理审计 + 对抗验证 + 批判性复审循环 + 真实测试（pytest + uvicorn 冒烟 + playwright + 真实 OpenAI token + bat 双击），非理想状态描述。</p>
+</footer>
+</body>
+</html>

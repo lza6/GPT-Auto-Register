@@ -22,13 +22,43 @@ function escapeHtml(s) {
   })[c]);
 }
 
-async function api(path, opts = {}) {
-  // 内部工具：无需管理密钥鉴权（后端 auth_key 为占位符时全部放行）
+// ── 鉴权（v3.1 审计补）：服务端配置真实 auth_key 后，前端须携带 X-Auth-Key。
+// 密钥存 localStorage；收到 401 时弹窗收集一次并重试。未配置（占位符）时后端全部放行，无需密钥。
+function getAuthKey() { try { return localStorage.getItem('gpt-reg-auth-key') || ''; } catch (e) { return ''; } }
+function setAuthKey(k) { try { k ? localStorage.setItem('gpt-reg-auth-key', k) : localStorage.removeItem('gpt-reg-auth-key'); } catch (e) {} }
+
+function promptAuthKey() {
+  return new Promise(resolve => {
+    openModal('🔐 需要管理密钥', `
+      <div class="hint">服务端已开启鉴权（auth_enforced + 真实 auth_key）。请输入 config.json 中的 <code>auth_key</code> 以继续。</div>
+      <div class="form-group"><label>管理密钥 (auth_key)</label>
+        <input type="password" id="authKeyInput" placeholder="输入 auth_key" autocomplete="off"></div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" id="authKeyCancel">取消</button>
+        <button class="btn btn-primary" id="authKeyOk">确定</button>
+      </div>`);
+    const done = v => { window.__authKeyResolve = null; closeModal(); resolve(v); };
+    window.__authKeyResolve = done;
+    document.getElementById('authKeyOk').onclick = () => done(document.getElementById('authKeyInput').value.trim());
+    document.getElementById('authKeyCancel').onclick = () => done('');
+    setTimeout(() => { const i = document.getElementById('authKeyInput'); if (i) i.focus(); }, 50);
+  });
+}
+
+async function api(path, opts = {}, _retried = false) {
+  // 内部工具：后端 auth_key 为占位符时全部放行；配置真实密钥后前端携带 X-Auth-Key
   const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+  const key = getAuthKey();
+  if (key) headers['X-Auth-Key'] = key;
   const resp = await fetch(API + '/api' + path, { ...opts, headers });
+  if (resp.status === 401 && !_retried) {
+    const entered = await promptAuthKey();
+    if (entered) { setAuthKey(entered); return api(path, opts, true); }
+  }
   if (!resp.ok) {
     let msg = 'HTTP ' + resp.status;
-    try { const j = await resp.json(); msg = j.detail || msg; } catch(e) {}
+    try { const j = await resp.json(); msg = j.detail || msg; } catch (e) {}
+    if (resp.status === 401) setAuthKey('');  // 密钥错误则清除，下次重新询问
     throw new Error(msg);
   }
   return resp.json();
@@ -217,11 +247,17 @@ async function submitManualAdd() {
 
 // ── 注册控制 ──
 async function startRegister() {
+  const btn = document.getElementById('btnStart');
   const count = parseInt(document.getElementById('cfgBatchSize').value) || 0;
+  if (btn) btn.disabled = true;  // 防重复点击（v3.1 审计）
   try {
     const data = await api('/register/start', { method: 'POST', body: JSON.stringify({ count }) });
     toast(`注册任务已启动，共 ${data.total} 个邮箱`);
-  } catch (e) { alert(e.message || '启动失败'); }
+    await refreshStatus();  // 立即收敛按钮态/徽章（其内部按 is_running 置 btnStart.disabled）
+  } catch (e) {
+    alert(e.message || '启动失败');
+    if (btn) btn.disabled = false;  // 启动失败则恢复可点
+  }
 }
 async function controlRegister(action) {
   try {
@@ -265,7 +301,7 @@ async function confirmClear() {
 }
 
 // ── 注册记录 ──
-async function loadAccounts() {
+async function loadAccounts(manual) {
   try {
     const search = document.getElementById('accSearch').value.trim();
     const status = document.getElementById('accStatus').value;
@@ -279,6 +315,7 @@ async function loadAccounts() {
     const pageCount = Math.max(1, Math.ceil((data.total || 0) / ACC_PAGE_SIZE));
     document.getElementById('accPageInfo').textContent = `第 ${accPage + 1}/${pageCount} 页`;
     if (!data.accounts || data.accounts.length === 0) {
+      if (accPage > 0) { accPage = 0; return loadAccounts(manual); }  // 页码越界自愈（删除/清空后回到第1页）
       tbody.innerHTML = ''; empty.style.display = 'block'; return;
     }
     empty.style.display = 'none';
@@ -304,11 +341,11 @@ async function loadAccounts() {
         <td style="white-space:nowrap">${time}</td>
       </tr>`;
     }).join('');
-  } catch (e) { console.error(e); }
+  } catch (e) { console.error(e); if (manual) toast('加载注册记录失败: ' + e.message); }
 }
 
 // ── 邮箱池 ──
-async function loadEmails() {
+async function loadEmails(manual) {
   try {
     const search = document.getElementById('emSearch').value.trim();
     const status = document.getElementById('emStatus').value;
@@ -321,6 +358,7 @@ async function loadEmails() {
     const pageCount = Math.max(1, Math.ceil((data.total || 0) / EM_PAGE_SIZE));
     document.getElementById('emPageInfo').textContent = `第 ${emPage + 1}/${pageCount} 页`;
     if (!data.emails || data.emails.length === 0) {
+      if (emPage > 0) { emPage = 0; return loadEmails(manual); }  // 页码越界自愈
       tbody.innerHTML = ''; empty.style.display = 'block'; return;
     }
     empty.style.display = 'none';
@@ -340,7 +378,7 @@ async function loadEmails() {
         <td><button class="btn btn-danger btn-sm" onclick="deleteEmail(${e.id})">删除</button></td>
       </tr>`;
     }).join('');
-  } catch (e) { console.error(e); }
+  } catch (e) { console.error(e); if (manual) toast('加载邮箱失败: ' + e.message); }
 }
 
 async function deleteEmail(id) {
@@ -364,7 +402,7 @@ async function clearEmails() {
 // ── 代理池 ──
 let proxyHealthMap = {};  // line(已 trim) -> {ok, error}（v3.1 T3）
 
-async function loadProxies() {
+async function loadProxies(manual) {
   try {
     const data = await api('/proxies/');
     const body = document.getElementById('proxiesBody');
@@ -381,7 +419,7 @@ async function loadProxies() {
       const rowCls = (h && !h.ok) ? ' class="failed"' : '';
       return `<tr${rowCls}><td>${i + 1}</td><td class="mono">${escapeHtml(l)}</td><td>${type}</td><td>${renderProxyHealth(key)}</td></tr>`;
     }).join('') + (lines.length > 100 ? `<tr><td colspan="4" class="muted">… 还有 ${lines.length - 100} 条未显示，点击「编辑代理池」查看全部</td></tr>` : '');
-  } catch (e) { console.error(e); }
+  } catch (e) { console.error(e); if (manual) toast('加载代理池失败: ' + e.message); }
 }
 
 // v3.1 T3：批量探测代理池可用性（TCP 可达性，≠ 账号可用）
@@ -457,8 +495,11 @@ async function loadLogs(force) {
     // 首次全量走 /logs（DESC 最新在前）需 reverse 让最新在底部；增量 after_id 已是 ASC 直接追加
     box.insertAdjacentHTML('beforeend', (lastLogId ? parts : parts.reverse()).join(''));
     data.logs.forEach(l => { if (l.id > lastLogId) lastLogId = l.id; });
+    // v3.1 审计：裁剪日志 DOM 上限，防长时间批量注册时节点无限膨胀导致页面卡顿
+    const MAX_LOG_NODES = 1500;
+    while (box.childElementCount > MAX_LOG_NODES) box.removeChild(box.firstChild);
     box.scrollTop = box.scrollHeight;
-  } catch (e) { console.error(e); }
+  } catch (e) { console.error(e); if (force) toast('加载日志失败: ' + e.message); }
 }
 async function clearLogs() {
   if (!confirm('确定清空日志？')) return;
@@ -472,7 +513,7 @@ async function loadSettings() {
     const cfg = await api('/settings/config');
     document.getElementById('cfgEmailSource').value = cfg.email_source_url || '';
     document.getElementById('cfgInterval').value = cfg.register_interval_sec || 10;
-    document.getElementById('cfgOtpTimeout').value = cfg.otp_wait_timeout_sec || 120;
+    document.getElementById('cfgOtpTimeout').value = cfg.otp_wait_timeout_sec || 600;
     document.getElementById('cfgBatchSize').value = cfg.batch_size || 100;
     document.getElementById('cfgC2apiUrl').value = cfg.chatgpt2api_url || 'http://127.0.0.1:23456';
     document.getElementById('cfgC2apiKey').value = cfg.chatgpt2api_admin_key || '';
@@ -602,19 +643,21 @@ function openAdvanced() {
   api('/settings/config').then(cfg => {
     const boolOf = (v, def) => (v === undefined || v === null) ? def
       : (v === true || v === 'true' || v === '1' || v === 1);
+    // v3.1 审计：数字强转，防配置脏值（含引号）从 value 属性逃逸
+    const numVal = (v, def) => { const n = parseInt(v, 10); return Number.isFinite(n) ? n : def; };
     const rows = Object.entries(cfg).map(([k, v]) =>
       `<tr><td class="mono">${escapeHtml(k)}</td><td class="mono">${escapeHtml(v)}</td></tr>`).join('');
     openModal('⚙️ 高级设置', `
       <div class="hint">以下为 v3.0 新增可编辑项，保存后重启生效。完整 config.json 见下方只读表。</div>
       <div class="form-row">
         <div class="form-group"><label>浏览器池大小 (0=不池化)</label>
-          <input type="number" id="cfgBrowserPoolSize" value="${cfg.browser_pool_size ?? 0}" min="0"></div>
+          <input type="number" id="cfgBrowserPoolSize" value="${numVal(cfg.browser_pool_size, 0)}" min="0"></div>
         <div class="form-group"><label>CF 重试次数 (0=不重试)</label>
-          <input type="number" id="cfgCfRetryMax" value="${cfg.cf_retry_max ?? 2}" min="0"></div>
+          <input type="number" id="cfgCfRetryMax" value="${numVal(cfg.cf_retry_max, 2)}" min="0"></div>
       </div>
       <div class="form-row">
         <div class="form-group"><label>Token 巡检间隔 (秒, ≥60)</label>
-          <input type="number" id="cfgTokenRefreshInterval" value="${cfg.token_refresh_interval_sec ?? 21600}" min="60"></div>
+          <input type="number" id="cfgTokenRefreshInterval" value="${numVal(cfg.token_refresh_interval_sec, 21600)}" min="60"></div>
         <div class="form-group"><label>Token 保鲜巡检</label>
           <label class="switch-row" style="margin-top:10px"><input type="checkbox" id="cfgTokenRefresh" ${boolOf(cfg.token_refresh_enabled, false) ? 'checked' : ''}> 启用（定期用 refresh_token 换新 access_token）</label></div>
       </div>

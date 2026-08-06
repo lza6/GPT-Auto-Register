@@ -132,7 +132,7 @@ def build_sentinel_token(
             "sec-ch-ua-platform": '"Windows"',
         },
         timeout=20,
-        verify=False,
+        # v3.1 安全审计：不再强制 verify=False，继承 session 的 TLS 校验设置（由调用方按 config.tls_verify 配置）
     )
 
     try:

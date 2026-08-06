@@ -126,6 +126,9 @@ async def register_status() -> dict:
 
 @router.get("/accounts")
 async def list_accounts(status: str = "", limit: int = 100, offset: int = 0, search: str = "") -> dict:
+    # v3.1 审计：limit 收敛安全范围（0/负数→默认 100，上限 500），offset 防负
+    limit = min(limit, 500) if limit > 0 else 100
+    offset = max(0, offset)
     accounts = get_accounts(status=status, limit=limit, offset=offset, search=search)
     total = count_accounts(status=status, search=search)  # COUNT 查询，避免全表装载
     return {"accounts": accounts, "total": total}
@@ -203,8 +206,27 @@ async def clear_data(req: ClearRequest) -> dict:
 CHATGPT2API_CLIENT_ID = "app_2SKx67EdpoN0G6j64rFvigXD"
 
 
-def _refresh_oauth(refresh_token: str) -> dict | None:
-    """用 OpenAI OAuth refresh_token 刷新，拿到标准 JWT access_token + id_token。"""
+def _resolve_refresh_proxy() -> str | None:
+    """解析导出刷新的代理：优先 config.proxy_url，其次代理池（use_proxy 时）。
+
+    与 token_refresher._resolve_proxy 一致——注册链路走代理，导出刷新若不走，
+    在「OpenAI 仅能经代理可达」的部署里会全部失败（v3.1 审计修复）。
+    """
+    config = _load_config()
+    proxy_url = str(config.get("proxy_url") or "").strip()
+    if proxy_url:
+        return proxy_url
+    use_proxy = config.get("use_proxy")
+    if use_proxy is True or (isinstance(use_proxy, str) and use_proxy.strip().lower() in ("1", "true", "yes", "on")):
+        from services.proxy_service import proxy_service
+        return proxy_service.get_next()
+    return None
+
+
+def _refresh_oauth(refresh_token: str, proxy_url: str | None = None) -> dict | None:
+    """用 OpenAI OAuth refresh_token 刷新，拿到标准 JWT access_token + id_token。走配置代理。"""
+    if proxy_url is None:
+        proxy_url = _resolve_refresh_proxy()  # 未显式传入时按配置解析（注册链路走代理，导出刷新须一致）
     try:
         resp = httpx.post(
             "https://auth.openai.com/oauth/token",
@@ -219,6 +241,7 @@ def _refresh_oauth(refresh_token: str) -> dict | None:
                 "client_id": CHATGPT2API_CLIENT_ID,
             },
             timeout=60,
+            proxy=proxy_url,
         )
         data = resp.json()
         if resp.status_code == 200 and data.get("access_token"):
@@ -227,8 +250,11 @@ def _refresh_oauth(refresh_token: str) -> dict | None:
                 "refresh_token": data.get("refresh_token", refresh_token),
                 "id_token": data.get("id_token", ""),
             }
+        add_log("warning", f"导出刷新失败: HTTP {resp.status_code}")
         return None
-    except Exception:
+    except Exception as e:
+        # 不再静默吞：导出刷新失败需可排障（v3.1 审计修复）
+        add_log("warning", f"导出刷新异常: {type(e).__name__}: {e}")
         return None
 
 
@@ -274,17 +300,36 @@ async def _collect_export_accounts() -> list[dict]:
             }))
 
     sem = asyncio.Semaphore(_EXPORT_REFRESH_CONCURRENCY)
+    # 代理解析一次统一传入：避免每账号重读 config + 反复推进代理池游标（v3.1 审查修复）
+    export_proxy = _resolve_refresh_proxy()
 
     async def _refresh_one(pair: tuple[dict, str]) -> dict | None:
         acc, ort = pair
         async with sem:
-            return await asyncio.to_thread(_refresh_oauth, ort)
+            return await asyncio.to_thread(_refresh_oauth, ort, export_proxy)
 
     results = await asyncio.gather(*(_refresh_one(p) for p in to_refresh), return_exceptions=True)
     for (acc, _ort), td in zip(to_refresh, results):
         if isinstance(td, dict) and td.get("access_token", "").startswith("eyJ"):
             accounts.append(_build_chatgpt2api_account(acc, td))
+            # 轮换的新 RT 写回 DB：OpenAI 重用检测会作废旧 RT，不写回则反复导出/巡检会耗尽库存 RT
+            new_rt = td.get("refresh_token") or ""
+            if new_rt and new_rt != _ort and acc.get("email"):
+                _writeback_rotated_tokens(acc["email"], td["access_token"], new_rt)
     return accounts
+
+
+def _writeback_rotated_tokens(email: str, access_token: str, refresh_token: str) -> None:
+    """导出刷新成功后把轮换的新 RT 写回 DB（v3.1 审计修复：防止库存 RT 被重用检测耗尽）。"""
+    try:
+        with db_session() as conn:
+            conn.execute(
+                "UPDATE accounts SET access_token = ?, openai_refresh_token = ? WHERE email = ?",
+                (access_token, refresh_token, email),
+            )
+    except Exception as e:
+        # 写回失败不影响导出主流程，但必须可排障（否则库存 RT 静默耗尽）
+        add_log("warning", f"RT 写回失败 [{email}]: {type(e).__name__}: {e}")
 
 
 def _get_chatgpt2api_admin_key() -> str:

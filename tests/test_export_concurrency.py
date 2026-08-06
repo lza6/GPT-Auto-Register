@@ -27,7 +27,7 @@ class TestExportConcurrency:
         running = {"n": 0, "max": 0}
         tl = threading.Lock()
 
-        def fake_refresh(ort):
+        def fake_refresh(ort, proxy=None):
             with tl:
                 running["n"] += 1
                 running["max"] = max(running["max"], running["n"])
@@ -44,7 +44,7 @@ class TestExportConcurrency:
     async def test_failed_refresh_skipped_but_total_kept(self, monkeypatch, isolated_db):
         _seed_accounts(5)
 
-        def fake_refresh(ort):
+        def fake_refresh(ort, proxy=None):
             if ort == "rt0":
                 return None  # 单账号刷新失败
             return _ok_token(ort)
@@ -63,7 +63,7 @@ class TestExportConcurrency:
         )
         called = {"n": 0}
 
-        def fake_refresh(ort):
+        def fake_refresh(ort, proxy=None):
             called["n"] += 1
             return _ok_token(ort)
 

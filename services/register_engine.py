@@ -37,8 +37,6 @@ class RegisterEngine:
             "user_agent",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
         )
-        self.otp_timeout = _as_int(config.get("otp_wait_timeout_sec"), 120)
-        self.otp_poll = _as_int(config.get("otp_poll_interval_sec"), 5)
         self.token_file = config.get("token_output_file", "已经获取到的token.txt")
         self._running = False
         self._paused = False
@@ -63,6 +61,10 @@ class RegisterEngine:
         """
         if self._running or self._starting:
             return False
+        # 新批次占位成功：清除上一次 stop() 残留的 _stop_requested，
+        # 否则 run_batch 开头读到陈旧 True 会误判「启动前已停止」直接空跑（v3.1 审计修复）。
+        # 不影响合法路径：try_start 之后再 stop() 会重新置 True，run_batch 仍能正确中止。
+        self._stop_requested = False
         self._starting = True
         return True
 
@@ -298,19 +300,31 @@ class RegisterEngine:
                                         f"建议更换代理出口 IP 后点「继续」")
                                 self.pause()
 
-            interval = _as_int(self.config.get("register_interval_sec"), 10)
-            if interval > 0 and self._running:
-                await asyncio.sleep(interval)
+                # 间隔限速须在 sem 内：槽位持有信号量走 interval，才真正间隔下一次注册启动
+                # （原在 sem 外：release 瞬间下一个等待者即启动，interval 形同虚设，注册实际背靠背）
+                interval = _as_int(self.config.get("register_interval_sec"), 10)
+                if interval > 0 and self._running:
+                    # 分段 sleep：让 stop 在 interval 期间也能 0.5s 内响应，而非干等整个 interval
+                    slept = 0.0
+                    while self._running and slept < interval:
+                        step = min(0.5, interval - slept)
+                        await asyncio.sleep(step)
+                        slept += step
 
-        results = await asyncio.gather(
-            *(process_one(i, mail) for i, mail in enumerate(emails)),
-            return_exceptions=True,
-        )
-        for exc in results:
-            if isinstance(exc, Exception):
-                add_log("error", f"并发注册槽异常: {exc}")
+        try:
+            results = await asyncio.gather(
+                *(process_one(i, mail) for i, mail in enumerate(emails)),
+                return_exceptions=True,
+            )
+            for exc in results:
+                if isinstance(exc, Exception):
+                    add_log("error", f"并发注册槽异常: {exc}")
+        finally:
+            # 无论并发体正常/异常结束都必须复位运行标志，否则异常路径 _running 永真、
+            # 后续 /start 永远被「已在运行中」拒绝（v3.1 审计修复）
+            self._running = False
+            self._starting = False
 
-        self._running = False
         task_status = "stopped" if stopped["flag"] else "completed"
         update_task_progress(
             task_id, stats["completed"], stats["failed"], stats["skipped"],

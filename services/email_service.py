@@ -11,6 +11,23 @@ import httpx
 from services.db import add_log, insert_email, mark_email_status
 
 
+def _tls_verify() -> bool:
+    """读取 config.json 的 tls_verify（默认 true）。email_service 是模块单例无 config 注入，懒读。
+
+    v3.1 安全审计：取件/取码请求携带邮箱账号密码与 refresh_token，须经 TLS 校验防 MITM。
+    """
+    try:
+        from pathlib import Path
+
+        from services.constants import tls_verify_enabled
+        cfg = Path(__file__).resolve().parent.parent / "config.json"
+        if cfg.exists():
+            return tls_verify_enabled(json.loads(cfg.read_text(encoding="utf-8")))
+    except Exception:
+        pass
+    return True
+
+
 def _as_int(value, default: int) -> int:
     """防御式整数解析：settings API 存字符串，非法/空回退默认。"""
     if value is None or value == "":
@@ -40,12 +57,12 @@ class EmailService:
             if m:
                 token = m.group(1)
             if not token:
-                add_log("error", f"无法从 URL 提取 token: {source_url}")
+                add_log("error", "无法从邮箱源 URL 提取 token（URL 即密钥，已脱敏不落日志）")
                 return accounts
 
             # 调用 91kami API
             api_url = "https://mai.91kami.com/api/Cpd/Detail"
-            async with httpx.AsyncClient(timeout=30, follow_redirects=True, verify=False) as client:
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True, verify=_tls_verify()) as client:
                 resp = await client.post(api_url, json={"token": token})
                 resp.raise_for_status()
                 data = resp.json()
@@ -95,9 +112,10 @@ class EmailService:
                                 "refresh_token": parts[3].strip(),
                             })
 
-                add_log("info", f"从 91kami 解析到 {len(accounts)} 个邮箱", {"token": token})
+                add_log("info", f"从 91kami 解析到 {len(accounts)} 个邮箱")
         except Exception as e:
-            add_log("error", f"邮箱源解析失败: {e}", {"source_url": source_url})
+            # 邮箱源 URL 即取货密钥，不落日志（v3.1 安全审计脱敏）
+            add_log("error", f"邮箱源解析失败: {type(e).__name__}: {e}")
         return accounts
 
     async def import_emails(self, source_url: str) -> dict[str, int]:

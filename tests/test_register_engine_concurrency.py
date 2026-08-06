@@ -161,6 +161,50 @@ class TestRunBatchConcurrency:
         t = db.get_task(task_id)
         assert t["status"] == "stopped"
 
+    async def test_start_after_stop_does_not_abort(self, isolated_db, monkeypatch):
+        """v3.1 审计回归：一次正常 stop 后，下一次 try_start+run_batch 不应被陈旧的
+        _stop_requested 误判为「启动前已停止」而空跑（completed 应为真实注册数）。"""
+        eng = RegisterEngine({"register_interval_sec": 0, "register_concurrency": 1})
+
+        async def fast(email, password, client_id, refresh_token):
+            return _ok(email)
+
+        monkeypatch.setattr(eng, "register_one", fast)
+        monkeypatch.setattr(eng, "_append_token", lambda t: None)
+
+        # 第一批正常跑完
+        stats1 = await eng.run_batch(_emails(2), task_id=_create_task(2))
+        assert stats1["completed"] == 2
+        # 用户随后调用 stop（此时无批次运行，残留 _stop_requested=True）
+        eng.stop()
+        assert eng._stop_requested is True
+        # 第二批（全新邮箱，避免与第一批去重）：try_start 应清除陈旧标志，run_batch 正常跑而非空转
+        assert eng.try_start() is True
+        fresh = [{"email": f"v{i}@y.com", "password": "p", "client_id": "c", "refresh_token": "r"} for i in range(3)]
+        stats2 = await eng.run_batch(fresh, task_id=_create_task(3))
+        assert stats2["completed"] == 3, "stop 后的新批次不应被陈旧停止标志中止"
+
+    async def test_register_interval_spaces_slot_start(self, isolated_db, monkeypatch):
+        """v3.1 审计回归：register_interval_sec 移入 sem 后，interval 真实占用槽位时间。
+
+        concurrency=1 + interval>0 时，两次注册启动间隔应 >= interval（原 sleep 在 sem 外失效）。
+        用较小 interval 验证语义而不拖慢测试。
+        """
+        eng = RegisterEngine({"register_interval_sec": 1, "register_concurrency": 1})
+        starts = []
+
+        async def fast(email, password, client_id, refresh_token):
+            starts.append(asyncio.get_event_loop().time())
+            return _ok(email)
+
+        monkeypatch.setattr(eng, "register_one", fast)
+        monkeypatch.setattr(eng, "_append_token", lambda t: None)
+
+        await eng.run_batch(_emails(2), task_id=_create_task(2))
+        assert len(starts) == 2
+        gap = starts[1] - starts[0]
+        assert gap >= 0.9, f"interval 应间隔两次注册启动，实际间隔 {gap:.2f}s（sem 外时≈0）"
+
     async def test_no_duplicate_registration_on_pause(self, isolated_db, monkeypatch):
         """暂停/恢复不应导致同一邮箱重复注册（注册次数 == 去重邮箱数）。"""
         eng = RegisterEngine({"register_interval_sec": 0, "register_concurrency": 2})

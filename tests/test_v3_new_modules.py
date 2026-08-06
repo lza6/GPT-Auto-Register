@@ -173,9 +173,11 @@ class TestTokenRefresher:
                                  openai_refresh_token="rt_b")
 
             r = TokenRefresher({})
-            # monkeypatch _refresh_token：rt_a 成功，rt_b 失败
+            # monkeypatch _refresh_token：rt_a 成功（返回三件套），rt_b 失败
             async def fake_refresh(rt):
-                return "new_tok" if rt == "rt_a" else None
+                if rt == "rt_a":
+                    return {"access_token": "new_tok", "refresh_token": "rt_a_rotated", "id_token": ""}
+                return None
             r._refresh_token = fake_refresh
 
             result = _run(r._scan_once())
@@ -183,10 +185,11 @@ class TestTokenRefresher:
             assert result["refreshed"] == 1
             assert result["failed"] == 1
 
-            # 验证 access_token 已更新
+            # 验证 access_token + 轮换后的新 refresh_token 均已落库（v3.1 审计修复）
             accs = dbmod.get_accounts(status="success")
             a = next(x for x in accs if x["email"] == "a@e.com")
             assert a["access_token"] == "new_tok"
+            assert a["openai_refresh_token"] == "rt_a_rotated", "轮换后的新 RT 必须落库，否则库存 RT 逐步耗尽"
         finally:
             dbmod.DB_PATH = orig
             dbmod.init_db()

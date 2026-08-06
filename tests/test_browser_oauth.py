@@ -98,7 +98,7 @@ class TestPushChatgpt2api:
         monkeypatch.setattr(reg_mod, "_get_chatgpt2api_admin_key", lambda: "real-key")
         monkeypatch.setattr(
             reg_mod, "_refresh_oauth",
-            lambda ort: {"access_token": "eyJ" + "x" * 200, "refresh_token": ort, "id_token": ""},
+            lambda ort, proxy=None: {"access_token": "eyJ" + "x" * 200, "refresh_token": ort, "id_token": ""},
         )
 
         def boom(*a, **k):

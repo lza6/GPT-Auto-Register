@@ -192,7 +192,7 @@ class GraphEmailService:
                         body = await self.get_email_body(email, mail_id, client_id, refresh_token)
                         code = self.extract_otp_code(body)
                         if code:
-                            add_log("info", f"成功提取新验证码: {code}", {"email": email})
+                            add_log("info", "成功提取新验证码（已脱敏）", {"email": email})
                             return code
             except Exception as e:
                 add_log("warning", f"轮询新验证码异常: {e}", {"email": email})

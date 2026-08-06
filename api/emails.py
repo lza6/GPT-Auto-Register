@@ -22,6 +22,9 @@ async def pending_emails(limit: int = 100) -> dict:
 @router.get("/")
 async def list_emails(status: str = "", limit: int = 0, offset: int = 0, search: str = "") -> dict:
     """邮箱池列表，支持状态筛选 / 邮箱搜索 / 分页。total 用 COUNT 查询避免全表装载。"""
+    # v3.1 审计：limit 收敛安全范围（0/负数→默认 100，上限 500），避免全表明文凭据被一次性拉取
+    limit = min(limit, 500) if limit > 0 else 100
+    offset = max(0, offset)
     conds: list[str] = []
     params: list = []
     if status:
@@ -31,12 +34,9 @@ async def list_emails(status: str = "", limit: int = 0, offset: int = 0, search:
         conds.append("email LIKE ?")
         params.append(f"%{search.strip()}%")
     where = (" WHERE " + " AND ".join(conds)) if conds else ""
-    sql = f"SELECT * FROM emails{where} ORDER BY id DESC"
+    sql = f"SELECT * FROM emails{where} ORDER BY id DESC LIMIT ? OFFSET ?"
     with db_session() as conn:
-        if limit > 0:
-            rows = conn.execute(sql + " LIMIT ? OFFSET ?", params + [limit, offset]).fetchall()
-        else:
-            rows = conn.execute(sql, params).fetchall()
+        rows = conn.execute(sql, params + [limit, offset]).fetchall()
     total = count_emails(status=status, search=search)
     return {"emails": [dict(r) for r in rows], "total": total}
 

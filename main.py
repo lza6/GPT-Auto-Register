@@ -23,6 +23,10 @@ def _init_logging() -> None:
     )
     for logger_name in ("gpt-register", ""):
         target = logging.getLogger(logger_name)
+        # v3.1 审计：logger 本身要设级别（只设 handler 而 logger 继承 WARNING 会丢 INFO/DEBUG）。
+        # 但 root 不能拉 DEBUG——否则 httpx/asyncio/playwright 的 DEBUG 会把携带
+        # refresh_token/密码的请求头与 body 写进 server.log（泄密）。root 保持 INFO。
+        target.setLevel(logging.DEBUG if logger_name == "gpt-register" else logging.INFO)
         if any(isinstance(h, logging.handlers.RotatingFileHandler) for h in target.handlers):
             continue
         handler = logging.handlers.RotatingFileHandler(
@@ -34,6 +38,9 @@ def _init_logging() -> None:
         handler.setLevel(logging.DEBUG)
         handler.setFormatter(formatter)
         target.addHandler(handler)
+    # 双保险：第三方 HTTP/浏览器库的明细日志压到 WARNING，防凭据/请求体落盘
+    for noisy in ("httpx", "httpcore", "urllib3", "playwright", "asyncio"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
 _init_logging()

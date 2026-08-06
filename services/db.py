@@ -175,13 +175,14 @@ def purge_old_logs(retention_days: int = 30) -> int:
 
 
 def insert_email(email: str, password: str, client_id: str, refresh_token: str) -> bool:
+    """插入邮箱；唯一冲突（OR IGNORE 未实际插入）返回 False，调用方据此次数准确计数。"""
     try:
         with db_session() as conn:
-            conn.execute(
+            cur = conn.execute(
                 "INSERT OR IGNORE INTO emails (email, password, client_id, refresh_token) VALUES (?, ?, ?, ?)",
                 (email, password, client_id, refresh_token),
             )
-        return True
+        return cur.rowcount > 0  # 唯一约束冲突时 OR IGNORE 插入 0 行 → False（不误报新增）
     except Exception:
         return False
 

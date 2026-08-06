@@ -122,7 +122,7 @@ class AuthKeyMiddleware:
 
 def create_app() -> FastAPI:
     config = load_config()
-    app = FastAPI(title="GPT 自动注册", version="3.1.0")
+    app = FastAPI(title="GPT 自动注册", version="3.1.1")
 
     # CORS：前端由本站同源静态服务提供，仅放行本地调试源，关闭凭据通配
     app.add_middleware(
@@ -172,7 +172,7 @@ def create_app() -> FastAPI:
             "browser_pool_size": browser_pool_size,
             "auth": "enabled" if auth_key else "disabled",
             "auth_enforced": auth_enforced,
-            "version": "3.1.0",
+            "version": "3.1.1",
         }
 
     # 优雅停机：uvicorn shutdown 时关浏览器池 + CF solver

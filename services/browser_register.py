@@ -38,6 +38,7 @@ from services.constants import (
     OAUTH_REDIRECT_URI,
     OAUTH_AUDIENCE,
     OAUTH_AUTH0_CLIENT,
+    tls_verify_enabled,
 )
 
 
@@ -69,7 +70,7 @@ class BrowserRegister:
 
     def __init__(self, config: dict[str, Any]) -> None:
         self.config = config
-        self.otp_timeout = _as_int(config.get("otp_wait_timeout_sec"), 120)
+        self.otp_timeout = _as_int(config.get("otp_wait_timeout_sec"), 600)
         self.otp_poll = _as_int(config.get("otp_poll_interval_sec"), 5)
         # CF 挑战解不开时换代理重试次数（每次重试 = 关 context → 换代理 → 重新 goto）
         # 默认 2：第一代理 CF 拦截，换一个出口 IP 再试一轮仍失败才降级 cf_blocked
@@ -783,7 +784,7 @@ class BrowserRegister:
             proxy_kwargs: dict[str, Any] = {}
             if proxy_url:
                 proxy_kwargs["proxy"] = proxy_url
-            async with httpx.AsyncClient(timeout=60, verify=False, **proxy_kwargs) as client:
+            async with httpx.AsyncClient(timeout=60, verify=tls_verify_enabled(self.config), **proxy_kwargs) as client:
                 resp = await client.post(
                     "https://auth.openai.com/api/accounts/oauth/token",
                     headers={

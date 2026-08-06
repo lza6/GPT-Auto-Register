@@ -20,7 +20,7 @@ from typing import Any
 
 import httpx
 
-from services.constants import OAUTH_CLIENT_ID, OAUTH_TOKEN_URL, OAUTH_REDIRECT_URI
+from services.constants import OAUTH_CLIENT_ID, OAUTH_TOKEN_URL, OAUTH_REDIRECT_URI, tls_verify_enabled
 from services.db import add_log, db_session
 
 
@@ -109,9 +109,10 @@ class TokenRefresher:
         async def refresh_one(acc: dict) -> None:
             async with sem:
                 try:
-                    new_token = await self._refresh_token(acc["openai_refresh_token"])
-                    if new_token:
-                        self._update_access_token(acc["email"], new_token)
+                    tokens = await self._refresh_token(acc["openai_refresh_token"])
+                    if tokens and tokens.get("access_token"):
+                        # 同时落库新 access_token 与轮换后的新 refresh_token（否则库存 RT 会逐步耗尽）
+                        self._update_tokens(acc["email"], tokens["access_token"], tokens.get("refresh_token", ""))
                         self._last_result["refreshed"] += 1
                     else:
                         self._last_result["failed"] += 1
@@ -142,14 +143,17 @@ class TokenRefresher:
             pass
         return None
 
-    async def _refresh_token(self, refresh_token: str) -> str | None:
-        """用 refresh_token 换新 access_token（可被测试 monkeypatch）。走配置代理。"""
+    async def _refresh_token(self, refresh_token: str) -> dict | None:
+        """用 refresh_token 换新三件套（可被测试 monkeypatch）。走配置代理。
+
+        返回 {access_token, refresh_token, id_token}；refresh_token 可能为空（未轮换时）。失败返回 None。
+        """
         proxy_url = self._resolve_proxy()
         try:
             proxy_kwargs: dict[str, Any] = {}
             if proxy_url:
                 proxy_kwargs["proxy"] = proxy_url
-            async with httpx.AsyncClient(timeout=30, verify=False, **proxy_kwargs) as client:
+            async with httpx.AsyncClient(timeout=30, verify=tls_verify_enabled(self._config), **proxy_kwargs) as client:
                 resp = await client.post(
                     OAUTH_TOKEN_URL,
                     headers={
@@ -167,20 +171,35 @@ class TokenRefresher:
                 )
                 data = resp.json() if resp.text else {}
                 if resp.status_code == 200 and data.get("access_token"):
-                    return data["access_token"]
+                    # 必须带回新 refresh_token：OpenAI 会轮换 RT 且旧的重用数次后作废
+                    # （实测 refresh_token_reused），不落库新 RT 会导致库存 RT 逐步失效。
+                    return {
+                        "access_token": data["access_token"],
+                        "refresh_token": data.get("refresh_token", ""),
+                        "id_token": data.get("id_token", ""),
+                    }
                 add_log("warning", f"token 刷新失败: HTTP {resp.status_code}")
                 return None
         except Exception as e:
             add_log("warning", f"token 刷新异常: {e}")
             return None
 
-    def _update_access_token(self, email: str, new_token: str) -> None:
-        """更新账号 access_token（保留旧值作 fallback 已由 REPLACE 语义覆盖）。"""
+    def _update_tokens(self, email: str, access_token: str, refresh_token: str = "") -> None:
+        """更新账号 access_token + 轮换后的新 refresh_token（关键：RT 轮换不落库会耗尽库存 RT）。
+
+        仅当返回了新 refresh_token 时才覆盖旧值（空则保留旧 RT，防误清）。
+        """
         with db_session() as conn:
-            conn.execute(
-                "UPDATE accounts SET access_token = ? WHERE email = ?",
-                (new_token, email),
-            )
+            if refresh_token:
+                conn.execute(
+                    "UPDATE accounts SET access_token = ?, openai_refresh_token = ? WHERE email = ?",
+                    (access_token, refresh_token, email),
+                )
+            else:
+                conn.execute(
+                    "UPDATE accounts SET access_token = ? WHERE email = ?",
+                    (access_token, email),
+                )
 
 
 token_refresher: TokenRefresher | None = None

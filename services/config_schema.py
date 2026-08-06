@@ -40,10 +40,12 @@ _CONFIG_SCHEMA: dict[str, tuple[tuple[type, ...], Any, bool]] = {
     "chatgpt2api_admin_key": ((str,), "", True),
     "log_retention_days": ((int,), 30, False),
     # v3.0 新增（schema 留位，缺省走默认）
-    "browser_pool_size": ((int,), 2, False),
+    "browser_pool_size": ((int,), 0, False),
     "token_refresh_enabled": ((bool, str), False, False),
     "token_refresh_interval_sec": ((int,), 21600, False),
     "cf_retry_max": ((int,), 2, False),
+    # v3.1 安全审计：TLS 证书校验开关（默认 true，SSL 拦截代理可设 false）
+    "tls_verify": ((bool, str), True, False),
 }
 
 

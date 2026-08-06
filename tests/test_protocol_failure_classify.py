@@ -119,7 +119,8 @@ class TestOtpWindowConfig:
 
     def test_defaults(self):
         reg = ProtocolRegister({})
-        assert reg.otp_min_age_window_sec == 8
+        # v3.1 审计：otp_min_age_window_sec 默认统一为 120（对齐 config.example/schema/README/browser_register）
+        assert reg.otp_min_age_window_sec == 120
         assert reg.otp_fallback_after_sec == 40
         assert reg.otp_backfill_window_min == 15
 
@@ -141,11 +142,31 @@ class TestPureHelpers:
         assert challenge == expected
 
     def test_build_authorize_url_contains_login_hint(self):
-        url = _build_authorize_url("user@example.com")
+        url = _build_authorize_url("user@example.com", "test_challenge_abc")
         assert "auth.openai.com/api/accounts/authorize" in url
         assert "login_hint=user%40example.com" in url
         assert "code_challenge_method=S256" in url
+        assert "code_challenge=test_challenge_abc" in url
         assert "client_id=app_2SKx67EdpoN0G6j64rFvigXD" in url
+
+    def test_authorize_url_challenge_matches_exchange_verifier(self):
+        """v3.1 审计回归：authorize 的 code_challenge 必须与换 token 的 code_verifier 同对。
+
+        原 bug：_build_authorize_url 内部独立 _gen_pkce() 丢弃 verifier，与 _register_sync
+        的 verifier 不是同一对 → sha256(verifier) != challenge → OpenAI 换 token 必失败。
+        """
+        from urllib.parse import parse_qs, urlparse
+
+        verifier, challenge = _gen_pkce()  # 模拟 _register_sync 生成同一对
+        url = _build_authorize_url("u@example.com", challenge)
+        # 从 URL 取出实际上报的 code_challenge
+        qs = parse_qs(urlparse(url).query)
+        reported = qs["code_challenge"][0]
+        # OpenAI 校验逻辑：sha256(verifier) == 上报的 challenge
+        recomputed = base64.urlsafe_b64encode(
+            hashlib.sha256(verifier.encode("ascii")).digest()
+        ).rstrip(b"=").decode("ascii")
+        assert reported == recomputed, "code_challenge 必须与 code_verifier 同对（PKCE 一致）"
 
     def test_extract_code_variants(self):
         assert _extract_code("https://x/callback?code=ac_xyz") == "ac_xyz"

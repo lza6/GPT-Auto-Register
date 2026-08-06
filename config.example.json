@@ -23,5 +23,10 @@
   "proxy_url": "http://127.0.0.1:10808",
   "chatgpt2api_url": "http://127.0.0.1:23456",
   "chatgpt2api_admin_key": "",
-  "log_retention_days": 30
+  "log_retention_days": 30,
+  "browser_pool_size": 0,
+  "token_refresh_enabled": false,
+  "token_refresh_interval_sec": 21600,
+  "cf_retry_max": 2,
+  "tls_verify": true
 }

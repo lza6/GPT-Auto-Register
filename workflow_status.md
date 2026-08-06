@@ -229,3 +229,71 @@ v3.0 后端能力已落地（浏览器池/schema/双引擎契约/token巡检/代
 - **前端拆分三重校验**：node --check + getElementById id 双向比对 + 无头浏览器点遍——单拆不验会漏迁 id/class 静默失效
 - **浏览器池异常实例要销毁不复用**：pooled_ok=False 时先关闭再标记占位让 release 丢弃，防坏实例池内循环放大失败
 - **代理按 context 隔离**：camoufox browser 实例代理无关（代理在 new_context 设置），池化 browser 不串 IP——这是 T6 可行的关键前提
+
+## 十二、终局闭环总审计（v3.1 后，2026-08-06 深夜档）
+
+### 审计框架
+- 技能：本地 `final-audit-workflow`（项目自带）+ `speckit-*` + `critical-code-reviewer`（均已装，无需联网）；addyosmani/agent-skills 作方法论参考
+- 方法：7 维并行子代理审计 → 对抗验证 → P0-P3 分级修复 → 批判性复审循环 → 真实验证 → 文档同步 → HTML 报告+测验
+- 基线：v3.1 已发布（256 pytest 全绿，T6/T7 已真实冒烟）
+
+### 需求追踪矩阵（本轮审计覆盖维度）
+| 维度 | 范围 | 状态 |
+|------|------|------|
+| API/契约 | api/*.py 参数/校验/错误码/鉴权/幂等 | 审计中 |
+| 前端/UI | web_dist 按钮/空态/加载/错误/防重复/XSS | 审计中 |
+| 后端/逻辑 | services 注册流/并发/异常/资源泄漏 | 审计中 |
+| 数据/SQL | db.py schema/索引/N+1/注入/迁移/脏数据 | 审计中 |
+| 配置/部署 | config/bat/启动/跨平台/硬编码 | 审计中 |
+| 安全 | 鉴权/注入/XSS/密钥/限流/CORS | 审计中 |
+| 文档 | README/docs 与真实一致性 | 审计中 |
+
+### 初审疑点（待对抗验证，勿直接当真）
+- register.py _refresh_oauth 导出刷新不走代理（与 token_refresher 本轮已修问题同类）
+- register_engine.run_batch 的 register_interval_sec sleep 在 sem 外，并发下限速语义存疑
+- 导出(_refresh_oauth)与保鲜(token_refresher)是两套不同 OAuth 实现（端点/client_id/数据格式都不同）
+
+## 十三、终局审计发现与修复清单（v3.1 审计轮，多代理 7 维 + 对抗验证）
+
+### P0/P1 已修（全部含验证证据）
+| # | 问题 | 严重度 | 修复 | 验证 |
+|---|------|--------|------|------|
+| 1 | protocol_register PKCE verifier/challenge 错配（换 token 必失败，被浏览器兜底掩盖） | P0 | _build_authorize_url(email, challenge) 共用同一对 | 实证 sha256(v)!=c→False + 回归测试 test_authorize_url_challenge_matches_exchange_verifier |
+| 2 | token_refresher 只存 access_token 丢弃轮换新 RT（库存 RT 逐步耗尽，实测 refresh_token_reused 401） | P0/P1 | _refresh_token 返回三件套 + _update_tokens 落库新 RT | 真实账号实测：新 access_token+新 RT 均落库 PASS |
+| 3 | 导出 _collect_export_accounts 刷新不写回新 RT（反复导出耗尽库存 RT） | P1 | _writeback_rotated_tokens 写回 | 导出测试 17 全绿 |
+| 4 | 前端无 X-Auth-Key 机制（开鉴权后 Web 全 401 变砖；README 宣称"前端需填"系伪功能） | P1 | app.js 加 localStorage 存储 + 401 弹窗收集 + 重试 | playwright 实测 401→弹窗→输密钥→恢复 PASS |
+| 5 | register_interval_sec sleep 在 sem 外（任何并发下不限速，注册背靠背） | P1 | 移入 sem 内 | 回归测试 test_register_interval_spaces_slot_start |
+| 6 | _stop_requested stop 后残留（下一次 /start 必静默中止） | P1 | try_start 成功时清除陈旧标志 | 回归测试 test_start_after_stop_does_not_abort |
+| 7 | 导出 _refresh_oauth 不走代理 + 失败静默 | P1 | _resolve_refresh_proxy + add_log 失败原因 | 导出测试 17 全绿 |
+| 8 | TLS verify=False（携带 refresh_token/密码/OAuth code 走第三方代理，MITM 风险） | P1 | 改 verify=tls_verify_enabled(config)，默认 true + config 兜底 | 实测 verify=True 经代理刷新成功（真实 JWT+RT 轮换） |
+
+### P0 待用户决策（非代码可修）
+- **生产实例无鉴权裸奔**：config.json auth_key 为占位符 + auth_enforced=false + host=0.0.0.0 → 全接口匿名可达。代码已有 fail-fast 机制（auth_enforced=true 时占位符拒绝启动）。**这是部署决策**：需用户设置真实 auth_key + auth_enforced=true。README 已详述。已在报告显著标注。
+
+### P2 已修（部分）
+- 启动.bat/停止.bat 强制 GPT_REGISTER_PORT=23457 覆盖 config.json port → 改为读 config.json（纯 ASCII，ADR-004 合规，字节检查 0）
+- cf_solver/README.md 印尼语上游原文 → 重写为本项目适配版（端口 8001、正确集成方式）
+- config.example.json 补 4 个 v3.0 键 + tls_verify
+- config_schema browser_pool_size 默认 2→0（对齐实际默认）
+- protocol_register otp_min_age_window_sec 默认 8→120（对齐文档）
+- main.py logger 只设 handler 级别 → 补 target.setLevel(DEBUG)（INFO/DEBUG 不再丢）
+- 敏感日志：graph OTP 明文、91kami 取货 URL/token 明文 → 脱敏
+- insert_email 唯一冲突误报成功 → rowcount 校验（导入计数准确）
+- emails/accounts 列表 limit 无界 → 收敛安全范围（防全表明文凭据拉取）
+- run_batch 无 try/finally → 加 finally 复位 _running（防异常后永久"已在运行中"）
+- 前端：startRegister 防重复+立即收敛；日志 DOM 上限 1500；分页越界自愈；手动刷新失败 toast；openAdvanced 值属性数字强转防 XSS
+- 死代码：CHATGPT2API_DEFAULT_URL 死常量删除；register_engine 死属性 otp_timeout/otp_poll 删除
+- otp_wait_timeout_sec 默认值三方分裂 120/600 → 统一 600（对齐 config.example/schema；对抗验证裁定影响被高估为 P2 一致性，修复保留）
+
+### P2/P3 长尾（诚实标注，未本轮闭环）
+- 设置保存后运行时不生效（get_engine 单例缓存 config）→ 需重启提示或热重载，P2
+- settings 双写非原子（DB 先写、config.json 后写无锁）→ P3
+- 清空类端点防护不一致（emails/clear、logs/clear 无 confirm）→ P3
+- /docs、/openapi.json 鉴权开启后仍公开 → P3（内部工具可接受）
+- main.py 模块顶层副作用双执行（uvicorn.run("main:app") 重导入）→ P3，幂等无实际危害
+- 前后端契约一致性、限流/熔断、慢查询猎杀、消息队列等高并发增强 → v3.2+
+
+### 复现坑（本轮新增）
+- **改 .bat 注释绝不能写中文**：本轮我一度在 bat 注释写中文（132/39 非 ASCII 字节），触发 ADR-004 红线。字节级检查（非 ASCII=0）是改 bat 后的必做验证
+- **OpenAI refresh_token 轮换有重用检测**：旧 RT 用 2-3 次后返回 refresh_token_reused 401。任何刷新都必须落库新 RT。实测用掉 2 个真实账号的 RT 链（dbf/xww）
+- **对抗验证很有价值**：审计员的 otp 默认值 P1 被验证裁定为影响高估（实际 P2 一致性）；新 RT 落库从 P3 被我真实测试升级回 P1

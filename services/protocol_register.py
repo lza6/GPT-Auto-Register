@@ -38,6 +38,7 @@ from services.constants import (
     OAUTH_AUDIENCE,
     OAUTH_AUTH0_CLIENT as AUTH0_CLIENT,
     OAUTH_ISSUER as AUTH_BASE,
+    tls_verify_enabled,
 )
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -75,8 +76,10 @@ def _gen_pkce() -> tuple[str, str]:
     return verifier, challenge
 
 
-def _build_authorize_url(email: str) -> str:
-    _, challenge = _gen_pkce()
+def _build_authorize_url(email: str, challenge: str) -> str:
+    # PKCE 关键：challenge 必须与后续 _exchange_code 用的 verifier 来自同一对，
+    # 否则 sha256(verifier) != challenge，OpenAI 换 token 必失败（v3.1 审计修复：
+    # 原实现此处独立 _gen_pkce() 丢弃 verifier，与 _register_sync 的 verifier 不是同一对）。
     params = {
         "issuer": AUTH_BASE,
         "client_id": OAUTH_CLIENT_ID,
@@ -111,7 +114,7 @@ class ProtocolRegister:
         self.ua = config.get("user_agent", USER_AGENT)
         self.otp_timeout = _as_int(config.get("otp_wait_timeout_sec"), 600)
         self.otp_poll = _as_int(config.get("otp_poll_interval_sec"), 5)
-        self.otp_min_age_window_sec = _as_int(config.get("otp_min_age_window_sec"), 8)
+        self.otp_min_age_window_sec = _as_int(config.get("otp_min_age_window_sec"), 120)
         self.otp_fallback_after_sec = _as_int(config.get("otp_fallback_after_sec"), 40)
         self.otp_backfill_window_min = _as_int(config.get("otp_backfill_window_min"), 15)
         self.proxy_url = config.get("proxy_url") or ""
@@ -129,7 +132,7 @@ class ProtocolRegister:
     def _make_session(self) -> Any:
         from curl_cffi import requests as cffi
 
-        session = cffi.Session(impersonate="chrome", verify=False, timeout=40)
+        session = cffi.Session(impersonate="chrome", verify=tls_verify_enabled(self.config), timeout=40)
         if self.proxy_url:
             session.proxies = {"http": self.proxy_url, "https": self.proxy_url}
         return session
@@ -244,7 +247,7 @@ class ProtocolRegister:
         from curl_cffi import requests as cffi
 
         session = cffi.Session(impersonate="chrome", proxy=self.proxy_url or None,
-                               verify=False, timeout=60)
+                               verify=tls_verify_enabled(self.config), timeout=60)
         try:
             r = session.post(
                 f"{AUTH_BASE}/api/accounts/oauth/token",
@@ -286,7 +289,7 @@ class ProtocolRegister:
             "failure_type": "unknown",
         }
         device_id = uuid.uuid4().hex
-        verifier, _ = _gen_pkce()
+        verifier, challenge = _gen_pkce()  # 同一对：challenge 进 authorize，verifier 换 token
         name = "".join(random.choices(string.ascii_lowercase, k=random.randint(6, 10)))
         year = random.randint(1986, 2006)
         birthdate = f"{year}-{random.randint(1, 12):02d}-{random.randint(1, 28):02d}"
@@ -299,7 +302,7 @@ class ProtocolRegister:
 
             # ── 1. authorize，建立会话并识别账号形态 ──
             r = session.get(
-                _build_authorize_url(email),
+                _build_authorize_url(email, challenge),
                 headers={
                     "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                     "user-agent": self.ua,

@@ -21,10 +21,13 @@ class TestAuthMiddleware:
         assert "browser_pool_size" in body
         assert "version" in body
 
-    def test_healthz_version_is_3_1_0(self, client):
-        """v3.1 T5：版本号统一为 3.1.0（与 v3.0 能力匹配）。"""
+    def test_healthz_version_matches_app(self, client):
+        """healthz 的 version 必须与 FastAPI app.version 一致（单一版本源，防两处漂移）。"""
         body = client.get("/api/healthz").json()
-        assert body["version"] == "3.1.0"
+        assert body["version"] == client.app.version
+        # semver 格式（x.y.z）
+        import re
+        assert re.match(r"^\d+\.\d+\.\d+$", body["version"])
 
     def test_static_frontend_served(self, client):
         """v3.1 T9：拆分后的前端三文件均可加载（无 404），且 app.css 无残留 </style>。"""

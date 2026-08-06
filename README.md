@@ -19,6 +19,13 @@
 | 🌓 **主题切换** | 深色/浅色一键切换（跟随系统），移动端自适应布局 |
 | 🗑️ **一键清空库** | 需输入 `clear` 确认，**清空前自动备份**到 `data/backups/`（保留最近 7 份） |
 | 📊 **失败原因分类** | 批量任务失败按 风控/验证码超时/网络/服务器5xx/未知 分类统计，前端可量化瓶颈 |
+| ⏸️ **失败自适应暂停** | 连续 3 次 server_5xx 自动暂停 60s 恢复；风控占比 >40% 暂停提示换代理（A4A6） |
+| 🔄 **Token 保鲜巡检** | 后台定期用 refresh_token 换新 access_token 并落库（含轮换新 RT），设置页可视化仪表盘（`GET /api/stats/token-health`），默认关（避免与 chatgpt2api 冲突） |
+| 🩺 **代理池健康探测** | 一键 TCP 可达性探测（并发 10/3s），可用/失效徽章 + 失效标红（`GET /api/proxies/health`） |
+| 🖥️ **浏览器实例池** | 可选 camoufox 实例复用（`browser_pool_size`，默认 0 不池化；固定通用代理场景才开，kookeey 动态代理池化会串 IP） |
+| 🔐 **鉴权** | `auth_key` + `X-Auth-Key` 头；`auth_enforced=true` 时占位符密钥拒绝启动（fail-fast）；前端 401 自动弹窗收集密钥 |
+| 🔒 **TLS 校验** | 出站 OpenAI/邮件请求默认校验证书（`tls_verify`，SSL 拦截代理可设 false 回退） |
+| ✅ **配置类型校验** | 启动时 `config_schema` warn-only 校验 config.json 类型，防"数字存成字符串"脏数据 |
 | 📝 **运行日志** | 实时增量拉取（轮询降载），可清空，超过保留期自动清理 |
 | ⚙️ **系统设置** | 邮箱源 URL、注册间隔、OTP 超时/轮询间隔、并发数、批量数量、邮件 API Base、UA、chatgpt2api 等 |
 
@@ -102,10 +109,16 @@ GPT-Auto-Register/
 │   └── logs.py              # 日志（增量拉取 / 保留清理）
 ├── services/                # 核心服务
 │   ├── protocol_register.py # 纯协议注册引擎（curl_cffi + sentinel）
-│   ├── browser_register.py  # camoufox 浏览器注册引擎（兜底）
+│   ├── browser_register.py  # camoufox 浏览器注册引擎（兜底，含浏览器池接入）
+│   ├── browser_pool.py      # 浏览器实例池（LRU + 代理绑定，默认不池化）
 │   ├── browser_selectors.py # 页面选择器集中管理（上游改版只改这一处）
-│   ├── register_engine.py   # 注册引擎（并发批量调度 + 失败分类）
+│   ├── register_engine.py   # 注册引擎（并发批量调度 + 失败分类 + 自适应暂停）
+│   ├── register_base.py     # 双引擎统一契约（RegisterEngineProtocol）
+│   ├── token_refresher.py   # token 保鲜巡检（定期刷新 + 轮换新 RT 落库）
+│   ├── config_schema.py     # config.json 类型校验（warn-only）
+│   ├── constants.py         # OpenAI OAuth 常量 + tls_verify_enabled
 │   ├── sentinel.py          # OpenAI Sentinel PoW token 生成
+│   ├── otp_extractor.py     # 验证码提取（font/bg/黑名单三合一）
 │   ├── email_service.py     # 98faka 邮箱验证码获取
 │   ├── graph_email_service.py # Microsoft Graph 取码（token LRU 缓存）
 │   ├── imap_email_service.py # IMAP 取码
@@ -116,8 +129,13 @@ GPT-Auto-Register/
 │   ├── name_service.py      # 随机姓名生成
 │   └── db.py                # SQLite 数据库（db_session 连接管理）
 ├── cf_solver/               # CF 验证 solver（端口 8001）
-├── web_dist/index.html      # 前端控制台（搜索/分页/主题）
-├── scripts/                 # 独立脚本（批量/对接 chatgpt2api）
+├── web_dist/                # 前端控制台（已拆三文件）
+│   ├── index.html           # 页面结构
+│   ├── app.js               # 交互逻辑（搜索/分页/主题/鉴权/仪表盘）
+│   └── app.css              # 样式（深浅色变量）
+├── scripts/                 # 独立脚本（批量/对接 chatgpt2api + 真实冒烟）
+│   ├── smoke_browser_pool.py  # 浏览器池真实 camoufox 复用冒烟
+│   ├── smoke_token_refresh.py # token 巡检真实刷新冒烟
 │   └── archive/             # 已归档的旧版实验脚本
 ├── tests/                   # 测试套件（覆盖率 ≥70%）
 ├── 计划书/                   # 改进指南 / 规划文档
@@ -130,7 +148,7 @@ GPT-Auto-Register/
 
 | 键 | 说明 | 默认 |
 |----|------|------|
-| `auth_key` | 控制台管理密钥（/api 接口鉴权，启用后前端设置页需填写） | - |
+| `auth_key` | 控制台管理密钥（/api 接口鉴权；开启后前端遇 401 自动弹窗收集，存于本机浏览器 localStorage） | - |
 | `auth_enforced` | 强制鉴权：`true` 且 auth_key 为占位符时启动失败（fail-fast），杜绝"假安全" | `false` |
 | `port` | 主服务端口 | `23457` |
 | `proxy_file` | 代理池文件 | `proxies.txt` |
@@ -152,9 +170,15 @@ GPT-Auto-Register/
 | `chatgpt2api_url` | chatgpt2api 地址 | `http://127.0.0.1:23456` |
 | `chatgpt2api_admin_key` | chatgpt2api 管理密钥（留空自动读取） | - |
 | `cf_retry_max` | CF 挑战解不开时换代理重试次数（0=不重试直接 cf_blocked） | `2` |
+| `browser_pool_size` | 浏览器实例池大小（0=不池化按需启停；仅固定通用 HTTP 代理场景才开，kookeey 动态代理池化会串 IP） | `0` |
+| `token_refresh_enabled` | 启用 token 保鲜巡检（后台定期刷新 access_token）；默认关避免与 chatgpt2api 冲突 | `false` |
+| `token_refresh_interval_sec` | token 巡检间隔（秒，最小 60） | `21600` |
+| `tls_verify` | 出站 OpenAI/邮件请求 TLS 证书校验（SSL 拦截代理环境设 `false` 回退） | `true` |
 
 > **日志容量上限**（`services/db.py` 常量）：`MAX_LOG_ROWS=20000`，超量自动删旧，防单日高频爆量。无需配置。
 > **CF Solver 端口**：固定 `8001`，随 `启动.bat` 自动拉起，`/api/healthz` 的 `cf_solver` 字段反映其状态。
+> **环境变量**：`GPT_REGISTER_AUTH_KEY` / `GPT_REGISTER_AUTH_ENFORCED` / `GPT_REGISTER_PORT` / `GPT_REGISTER_TOKEN_REFRESH_ENABLED` 可零改配置注入（优先级高于 config.json）。
+> **真实冒烟脚本**：`scripts/smoke_browser_pool.py`（浏览器池真实 camoufox 复用）、`scripts/smoke_token_refresh.py`（token 巡检真实刷新）可在真实环境验证池化与巡检。
 
 ---
 
@@ -195,7 +219,7 @@ GPT-Auto-Register/
 6. **健康检查**：部署探活用 `GET /api/healthz`（无需鉴权），返回 `db/cf_solver/browser_pool_size/version/auth` 状态。
    ```bash
    curl http://localhost:23457/api/healthz
-   # {"status":"ok","db":"ok","cf_solver":"ok","browser_pool_size":0,"auth":"enabled","version":"3.1.0"}
+   # {"status":"ok","db":"ok","cf_solver":"ok","browser_pool_size":0,"auth":"enabled","version":"3.1.1"}
    ```
    - `cf_solver=unknown` 表示 CF Solver(:8001) 未启动，注册遇 CF 挑战时会降级 `cf_blocked`。
    - `browser_pool_size` 为 0 正常（camoufox 按需启动，A5 浏览器池落地后改持久池）。
