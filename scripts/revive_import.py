@@ -79,9 +79,12 @@ PROXY = "http://127.0.0.1:10808"
 MAIL_API = "https://app.98faka.top"
 
 AUTH_BASE = "https://auth.openai.com"
-OAUTH_CLIENT_ID = "app_2SKx67EdpoN0G6j64rFvigXD"
-REDIRECT_URI = "https://platform.openai.com/auth/callback"
-AUTH0_CLIENT = "eyJuYW1lIjoiYXV0aDAtc3BhLWpzIiwidmVyc2lvbiI6IjEuMjEuMCJ9"
+# OAuth 常量收敛到 services/constants.py（B5），保留别名向后兼容
+from services.constants import (
+    OAUTH_CLIENT_ID,
+    OAUTH_REDIRECT_URI as REDIRECT_URI,
+    OAUTH_AUTH0_CLIENT as AUTH0_CLIENT,
+)
 USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36")
 

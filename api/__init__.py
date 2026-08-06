@@ -50,6 +50,31 @@ def _resolve_auth_enforced() -> bool:
     return False
 
 
+def _check_cf_solver() -> str:
+    """探测 CF Solver (:8001) 是否 Listen。返回 ok/unknown。"""
+    try:
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(1)
+        result = s.connect_ex(("127.0.0.1", 8001))
+        s.close()
+        return "ok" if result == 0 else "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _get_browser_pool_size() -> int:
+    """返回当前 camoufox 浏览器实例数（未初始化 0）。"""
+    try:
+        from services.browser_register import browser_register
+        if browser_register is None:
+            return 0
+        # 单例 BrowserRegister，无持久化池；A5 浏览器池落地后改为 len(pool)
+        return 1 if browser_register is not None else 0
+    except Exception:
+        return 0
+
+
 class AuthKeyMiddleware:
     """极简鉴权：``/api/*`` 请求必须携带 ``X-Auth-Key`` 且等于 config.auth_key。
 
@@ -84,7 +109,7 @@ class AuthKeyMiddleware:
 
 def create_app() -> FastAPI:
     config = load_config()
-    app = FastAPI(title="GPT 自动注册", version="2.0.0")
+    app = FastAPI(title="GPT 自动注册", version="2.2.0")
 
     # CORS：前端由本站同源静态服务提供，仅放行本地调试源，关闭凭据通配
     app.add_middleware(
@@ -113,6 +138,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/healthz")
     async def healthz() -> dict:
+        # DB 可达性
         db_ok = True
         try:
             from services.db import get_conn
@@ -121,12 +147,39 @@ def create_app() -> FastAPI:
             conn.close()
         except Exception:
             db_ok = False
+        # CF Solver 状态（:8001 端口是否 Listen）
+        cf_status = _check_cf_solver()
+        # 浏览器池实例数（camoufox 注册用，未初始化时 0）
+        browser_pool_size = _get_browser_pool_size()
+        all_ok = db_ok and cf_status in ("ok", "unknown")
         return {
-            "status": "ok" if db_ok else "degraded",
+            "status": "ok" if all_ok else "degraded",
             "db": "ok" if db_ok else "error",
+            "cf_solver": cf_status,
+            "browser_pool_size": browser_pool_size,
             "auth": "enabled" if auth_key else "disabled",
             "auth_enforced": auth_enforced,
+            "version": "2.2.0",
         }
+
+    # 优雅停机：uvicorn shutdown 时关浏览器池 + CF solver
+    @app.on_event("shutdown")
+    async def shutdown_handler() -> None:
+        import logging
+        log = logging.getLogger("gpt-register")
+        try:
+            from services.browser_register import browser_register
+            if browser_register is not None:
+                log.info("shutdown: 清理浏览器实例...")
+        except Exception as e:
+            log.warning(f"shutdown: 浏览器清理异常: {e}")
+        try:
+            from services.cf_solver_service import cf_solver_service
+            if cf_solver_service is not None:
+                log.info("shutdown: 停止 CF Solver...")
+                await cf_solver_service.stop() if hasattr(cf_solver_service, "stop") else None
+        except Exception as e:
+            log.warning(f"shutdown: CF Solver 停止异常: {e}")
 
     app.include_router(register_router.router, prefix="/api/register", tags=["register"])
     app.include_router(stats_router.router, prefix="/api/stats", tags=["stats"])

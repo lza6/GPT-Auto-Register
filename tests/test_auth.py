@@ -15,6 +15,11 @@ class TestAuthMiddleware:
         body = resp.json()
         assert body["status"] == "ok"
         assert body["auth"] == "enabled"
+        # D3: healthz 新增字段
+        assert "db" in body
+        assert "cf_solver" in body
+        assert "browser_pool_size" in body
+        assert "version" in body
 
     def test_sensitive_endpoint_requires_key(self, client):
         resp = client.get("/api/register/status")

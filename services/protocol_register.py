@@ -31,11 +31,14 @@ import requests
 
 from services.sentinel import build_sentinel_token
 
-# OpenAI OAuth 常量（与 browser_register / chatgpt2api 保持一致）
-AUTH_BASE = "https://auth.openai.com"
-OAUTH_CLIENT_ID = "app_2SKx67EdpoN0G6j64rFvigXD"
-REDIRECT_URI = "https://platform.openai.com/auth/callback"
-AUTH0_CLIENT = "eyJuYW1lIjoiYXV0aDAtc3BhLWpzIiwidmVyc2lvbiI6IjEuMjEuMCJ9"
+# OpenAI OAuth 常量：收敛到 services/constants.py（B5），保留别名向后兼容
+from services.constants import (
+    OAUTH_CLIENT_ID,
+    OAUTH_REDIRECT_URI as REDIRECT_URI,
+    OAUTH_AUDIENCE,
+    OAUTH_AUTH0_CLIENT as AUTH0_CLIENT,
+    OAUTH_ISSUER as AUTH_BASE,
+)
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
@@ -77,7 +80,7 @@ def _build_authorize_url(email: str) -> str:
     params = {
         "issuer": AUTH_BASE,
         "client_id": OAUTH_CLIENT_ID,
-        "audience": "https://api.openai.com/v1",
+        "audience": OAUTH_AUDIENCE,
         "redirect_uri": REDIRECT_URI,
         "device_id": uuid.uuid4().hex,
         "screen_hint": "login_or_signup",

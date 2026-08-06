@@ -114,12 +114,24 @@ def init_db() -> None:
     conn.close()
 
 
+MAX_LOG_ROWS = 20000  # logs 表硬上限：超量删最旧一批，防单日高频爆量（M4）
+_LOG_TRIM_COUNTER = {"n": 0}  # 每 100 次插入才检查一次上限，避免每次插入都跑 DELETE 子查询
+
+
 def add_log(level: str, message: str, data: Any = None) -> None:
     with db_session() as conn:
         conn.execute(
             "INSERT INTO logs (level, message, data, created_at) VALUES (?, ?, ?, ?)",
             (level, message, json.dumps(data, ensure_ascii=False) if data else None, time.time()),
         )
+    # M4 容量上限：每 100 次插入才检查一次，避免高频写入时 DELETE 子查询拖慢
+    _LOG_TRIM_COUNTER["n"] += 1
+    if _LOG_TRIM_COUNTER["n"] % 100 == 0:
+        with db_session() as conn:
+            conn.execute(
+                "DELETE FROM logs WHERE id <= (SELECT COALESCE(MAX(id), 0) FROM logs) - ?",
+                (MAX_LOG_ROWS,),  # 删到只剩 MAX_LOG_ROWS 条
+            )
 
 
 def get_logs(limit: int = 100, offset: int = 0) -> list[dict]:
@@ -247,16 +259,32 @@ def count_emails(status: str = "", search: str = "") -> int:
 
 
 def get_stats() -> dict:
+    # 单条聚合 SQL 取 emails + accounts 全量/分状态计数（替代原 9 次独立 COUNT 查询，L4 性能优化）
+    with db_session() as conn:
+        row = conn.execute(
+            """
+            SELECT
+              (SELECT COUNT(*) FROM emails) AS emails_total,
+              (SELECT COUNT(*) FROM emails WHERE status='pending') AS emails_pending,
+              (SELECT COUNT(*) FROM emails WHERE status='used') AS emails_used,
+              (SELECT COUNT(*) FROM accounts) AS accounts_total,
+              (SELECT COUNT(*) FROM accounts WHERE status='success') AS accounts_success,
+              (SELECT COUNT(*) FROM accounts WHERE status='failed') AS accounts_failed,
+              (SELECT COUNT(*) FROM accounts WHERE status='skipped') AS accounts_skipped,
+              (SELECT COUNT(*) FROM accounts WHERE status='pending') AS accounts_pending,
+              (SELECT COUNT(*) FROM accounts WHERE status='registering') AS accounts_registering
+            """
+        ).fetchone()
     stats = {
-        "emails_total": count_emails(),
-        "emails_pending": count_emails("pending"),
-        "emails_used": count_emails("used"),
-        "accounts_total": count_accounts(),
-        "accounts_success": count_accounts("success"),
-        "accounts_failed": count_accounts("failed"),
-        "accounts_skipped": count_accounts("skipped"),
-        "accounts_pending": count_accounts("pending"),
-        "accounts_registering": count_accounts("registering"),
+        "emails_total": row["emails_total"] if row else 0,
+        "emails_pending": row["emails_pending"] if row else 0,
+        "emails_used": row["emails_used"] if row else 0,
+        "accounts_total": row["accounts_total"] if row else 0,
+        "accounts_success": row["accounts_success"] if row else 0,
+        "accounts_failed": row["accounts_failed"] if row else 0,
+        "accounts_skipped": row["accounts_skipped"] if row else 0,
+        "accounts_pending": row["accounts_pending"] if row else 0,
+        "accounts_registering": row["accounts_registering"] if row else 0,
     }
     # 最近一次批量任务的失败原因分类分布（run_batch 写入 tasks.result.failure_types）
     stats["last_task_failure_types"] = {}

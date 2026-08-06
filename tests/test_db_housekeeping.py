@@ -73,3 +73,51 @@ class TestConfigTemplate:
             "otp_fallback_after_sec", "otp_backfill_window_min", "log_retention_days",
         ):
             assert key in cfg, f"config.example.json 缺少字段: {key}"
+
+
+class TestLogsCapacityM4:
+    """M4: logs 表硬上限 MAX_LOG_ROWS，超量自动删旧（每 100 次插入触发一次）。"""
+
+    def test_max_log_rows_constant(self):
+        assert db.MAX_LOG_ROWS == 20000
+
+    def test_logs_capped_after_overflow(self, isolated_db, monkeypatch):
+        """临时降 MAX_LOG_ROWS 到 50，插 250 条（触发 2 次清理），验证容量受控。"""
+        monkeypatch.setattr(db, "MAX_LOG_ROWS", 50)
+        # 重置计数器，确保触发清理
+        db._LOG_TRIM_COUNTER["n"] = 0
+        for i in range(250):
+            db.add_log("info", f"msg-{i}")
+        logs = db.get_logs(limit=500)
+        # 清理后应 ≤ MAX_LOG_ROWS(50) + 100 次插入窗口内的余量
+        assert len(logs) <= 50 + 100, f"logs 应受上限，实际 {len(logs)}"
+        assert len(logs) > 0
+
+
+class TestGetStatsAggregatedL4:
+    """L4: get_stats 聚合 SQL 不破坏返回结构且计数正确。"""
+
+    def test_stats_returns_all_fields(self, isolated_db):
+        stats = db.get_stats()
+        expected = {
+            "emails_total", "emails_pending", "emails_used",
+            "accounts_total", "accounts_success", "accounts_failed",
+            "accounts_skipped", "accounts_pending", "accounts_registering",
+            "last_task_failure_types",
+        }
+        assert set(stats.keys()) == expected
+        assert isinstance(stats["emails_total"], int)
+        assert stats["last_task_failure_types"] == {}
+
+    def test_stats_counts_correct(self, isolated_db):
+        db.insert_email("a@e.com", "p", "c", "r")
+        db.insert_email("b@e.com", "p", "c", "r")
+        db.mark_email_status("a@e.com", "used")
+        db.insert_account(email="x@e.com", password="p", client_id="c",
+                          refresh_token="r", proxy="直连", status="success", access_token="t")
+        stats = db.get_stats()
+        assert stats["emails_total"] == 2
+        assert stats["emails_used"] == 1
+        assert stats["emails_pending"] == 1
+        assert stats["accounts_success"] == 1
+        assert stats["accounts_total"] == 1
