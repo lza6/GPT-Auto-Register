@@ -289,3 +289,63 @@ class TestFailureTypes:
         assert row is not None
         assert row["status"] == "failed"
         assert "注册异常" in row["error"]
+
+
+class TestAdaptivePause:
+    """v3.1.1 覆盖率补缺：A4A6 失败自适应暂停的真实分支（原未被覆盖）。"""
+
+    async def test_server_5xx_streak_pauses(self, isolated_db, monkeypatch):
+        """连续 3 次 server_5xx 失败 → 自动暂停（is_paused=True）。"""
+        eng = RegisterEngine({"register_interval_sec": 0, "register_concurrency": 1})
+
+        async def fail_5xx(email, password, client_id, refresh_token):
+            return _fail(email, "server_5xx", "HTTP 503")
+
+        monkeypatch.setattr(eng, "register_one", fail_5xx)
+        monkeypatch.setattr(eng, "_append_token", lambda t: None)
+        # 恰好 3 个：第 3 次触发暂停，无后续邮箱被 pause_event 阻塞
+        await eng.run_batch(_emails(3), task_id=_create_task(3))
+        assert eng.is_paused is True
+
+    async def test_risk_control_over_40pct_pauses(self, isolated_db, monkeypatch):
+        """风控占比 >40%（且 total_done>=5）→ 暂停提示换代理。"""
+        eng = RegisterEngine({"register_interval_sec": 0, "register_concurrency": 1})
+
+        async def fail_rc(email, password, client_id, refresh_token):
+            return _fail(email, "risk_control", "风控拦截")
+
+        monkeypatch.setattr(eng, "register_one", fail_rc)
+        monkeypatch.setattr(eng, "_append_token", lambda t: None)
+        await eng.run_batch(_emails(5), task_id=_create_task(5))
+        assert eng.is_paused is True
+
+    async def test_network_failure_does_not_pause(self, isolated_db, monkeypatch):
+        """非 server_5xx/风控类失败（如 network）不应触发自适应暂停。"""
+        eng = RegisterEngine({"register_interval_sec": 0, "register_concurrency": 1})
+
+        async def fail_net(email, password, client_id, refresh_token):
+            return _fail(email, "network", "连接超时")
+
+        monkeypatch.setattr(eng, "register_one", fail_net)
+        monkeypatch.setattr(eng, "_append_token", lambda t: None)
+        await eng.run_batch(_emails(5), task_id=_create_task(5))
+        assert eng.is_paused is False  # network 失败不触发暂停
+
+    async def test_success_no_token_branch(self, isolated_db, monkeypatch):
+        """success_no_token 分支：计入 completed、落库 success_no_token、不 append token。"""
+        eng = RegisterEngine({"register_interval_sec": 0, "register_concurrency": 1})
+        appended = []
+
+        async def no_token(email, password, client_id, refresh_token):
+            r = _ok(email)
+            r["status"] = "success_no_token"
+            r["access_token"] = ""
+            return r
+
+        monkeypatch.setattr(eng, "register_one", no_token)
+        monkeypatch.setattr(eng, "_append_token", lambda t: appended.append(t))
+        stats = await eng.run_batch(_emails(2), task_id=_create_task(2))
+        assert stats["completed"] == 2
+        assert appended == []  # 无 token 不写入
+        accs = db.get_accounts(status="success_no_token")
+        assert len(accs) == 2

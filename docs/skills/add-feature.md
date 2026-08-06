@@ -13,10 +13,11 @@
 
 ## 0. 动手前必读（顺序强制）
 
-1. **`.specify/memory/constitution.md`** — 最高准则（真实落地/生产可用/增量迭代/先思考后编码/证据驱动）。
-2. **`workflow_status.md`** — 验证历史 + 复现坑。**先看要改的区域是否已验证/已修过，避免重复劳动**。
-3. **记忆文件** `gpt-auto-register-v2-state.md` — 关键已修复点 + 复现坑（如 PKCE 配对、RT 轮换、bat for/f 坑、root logger、TLS verify）。
-4. **判断过时**：若记录引用的文件/行号/函数已变，先 `git diff` + Read 当前真实代码校准，**不信考古结论**。
+1. **`docs/VALIDATION_RECORDS.md`** — 验证记录登记册。**先看要改的区域是否已验证**：已验证且未改动 → 复用结论不重复验证；改动过 → 标 `⚠️ 需复验`。
+2. **`.specify/memory/constitution.md`** — 最高准则（真实落地/生产可用/增量迭代/先思考后编码/证据驱动）。
+3. **`workflow_status.md`** — 验证历史 + 复现坑。
+4. **记忆文件** `gpt-auto-register-v2-state.md` — 关键已修复点 + 复现坑（如 PKCE 配对、RT 轮换、bat for/f 坑、root logger、TLS verify）。
+5. **判断过时**：若记录引用的文件/行号/函数已变，先 `git diff` + Read 当前真实代码校准，**不信考古结论**。
 
 ## 1. 分层归属（不跨层）
 

@@ -22,6 +22,34 @@ def isolated_db(tmp_path, monkeypatch):
     return tmp_path
 
 
+@pytest.fixture(autouse=True)
+def _reset_service_singletons():
+    """每个测试前重置引擎/服务单例，防跨测试状态残留（顺序无关/可重复）。
+
+    v3.1.1 终局审计发现：get_engine/get_protocol_register/get_browser_register 等是模块级
+    单例，前序测试的 _running/_starting/_stop_requested/config 会泄漏到后续测试，导致
+    同一测试单独跑过、全量跑失败（"覆盖率≠上线不出 bug"的测试可靠性隐患）。
+    """
+    import services.register_engine as re_mod
+    import services.protocol_register as pr_mod
+    import services.browser_register as br_mod
+    import services.browser_pool as bp_mod
+    import services.token_refresher as tr_mod
+
+    re_mod.register_engine = None
+    pr_mod.protocol_register = None
+    br_mod.browser_register = None
+    bp_mod.browser_pool = None
+    tr_mod.token_refresher = None
+    yield
+    # 测试后再清一次，避免后台任务句柄残留
+    re_mod.register_engine = None
+    pr_mod.protocol_register = None
+    br_mod.browser_register = None
+    bp_mod.browser_pool = None
+    tr_mod.token_refresher = None
+
+
 @pytest.fixture
 def client(monkeypatch, tmp_path):
     """构造隔离配置的 FastAPI TestClient。

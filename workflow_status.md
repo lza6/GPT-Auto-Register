@@ -303,3 +303,29 @@ v3.0 后端能力已落地（浏览器池/schema/双引擎契约/token巡检/代
 - 批判性复审循环：初判 Request Changes（C1 bat伪修复/H1 root泄密/H2 verify漏改/R1-R5）→ 主线程修复 → 复验 **Approve**（无 Blocking/High/Required 残留）
 - HTML 报告 docs/CHANGE_REPORT_v3.1.1.html（含 7 题测验）；新增 add-feature 技能（.claude/skills/add-feature + docs/skills/add-feature.md 仓库副本）
 - 本轮净发现价值：PKCE 错配 + RT 轮换不落库两个潜伏生产级 bug（真实测试挖出）；纠正"旧 RT 不作废"过时记忆；bat for/f 伪修复被复审抓获
+
+## 十四、压测/渗透 + 慢查询猎杀 + 覆盖率补缺 + 文档体系（v3.1.1 续，2026-08-06 深夜档二轮）
+
+### 本轮新增（真实执行，非纸面）
+| 维度 | 结论 | 证据 |
+|------|------|------|
+| SQL 注入面 | 全仓拼接点核查：动态标识符全硬编码、值全参数化，无注入 | grep execute(f"...") |
+| 慢查询/索引猎杀 | 5万行测试库 EXPLAIN：按 status 全命中索引、logs 走主键、get_stats 聚合走 covering index，无毒 SQL | EXPLAIN QUERY PLAN |
+| 压测/渗透 | 新增 tests/test_stress_security.py 12 项：并发竞态/注入/极端参数/超大批量(2000行)/鉴权边界 全过 | 12 passed |
+| 测试隔离隐患 | 发现并修复：get_engine 等单例跨测试残留 → conftest autouse 重置（顺序无关） | test_double_start 全量从失败→过 |
+| 覆盖率补缺 | A4A6 自适应暂停（server_5xx/风控/network/success_no_token 分支）原未覆盖 → 新增 4 测试 | TestAdaptivePause 4 passed |
+| config.json 并发写 | 8 并发写不产生损坏 JSON | test_concurrent_settings_writes |
+
+### 文档体系（新人/运维/范例/验证记录）
+- docs/ONBOARDING.md（新人保姆：跑起来/架构/加功能/红线/坑表）
+- docs/SOP.md（SOP-01~10：部署/鉴权/导入/注册/导出/巡检/备份/排障/升级/安全检查单）
+- docs/GOLDEN_EXAMPLES.md（9 个黄金代码范例 + 反面教材指引）
+- docs/VALIDATION_RECORDS.md（验证记录登记册：已验证区域+范围+复验触发条件，**下次先读避免盲目重审**）
+- add-feature 技能接入 VALIDATION_RECORDS 作为第一必读
+
+### 测试
+- 全量 275 全绿（259 + 压测12 + 自适应4 + 版本断言改健壮）
+
+### 复现坑（本轮新增）
+- **测试单例隔离**：get_engine/get_protocol_register 等模块级单例跨测试残留 → 单独跑过、全量跑挂。conftest autouse 重置解决。这是"覆盖率高但上线出 bug"的测试可靠性根因之一
+- **cmd for/f 与 python 括号**：for /f ('python -c ...') 遇 python 代码里的 ) 提前闭合命令串静默失败 → 读 config 用 python 写临时文件 + set/p
