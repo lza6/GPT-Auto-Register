@@ -111,6 +111,18 @@ def init_db() -> None:
                 conn.execute(f"ALTER TABLE accounts ADD COLUMN {col} TEXT")
             except Exception:
                 pass
+        # 索引：高频查询字段补索引，避免数据量大时全表扫描（L4 配套性能优化）
+        # CREATE INDEX IF NOT EXISTS 幂等，旧库升级与新库首次初始化都安全
+        for idx_sql in (
+            "CREATE INDEX IF NOT EXISTS idx_accounts_status ON accounts(status)",
+            "CREATE INDEX IF NOT EXISTS idx_emails_status ON emails(status)",
+            "CREATE INDEX IF NOT EXISTS idx_logs_created_at ON logs(created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)",
+        ):
+            try:
+                conn.execute(idx_sql)
+            except Exception:
+                pass
     conn.close()
 
 

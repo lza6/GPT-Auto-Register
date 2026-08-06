@@ -121,3 +121,26 @@ class TestGetStatsAggregatedL4:
         assert stats["emails_pending"] == 1
         assert stats["accounts_success"] == 1
         assert stats["accounts_total"] == 1
+
+
+class TestIndexes:
+    """L4 配套：高频查询字段有索引，避免数据量大时全表扫描。"""
+
+    def test_indexes_created(self, isolated_db):
+        """init_db 后 accounts/emails/logs/tasks 状态字段应有索引。"""
+        with db.db_session() as conn:
+            idxs = {row["name"] for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            ).fetchall()}
+        assert "idx_accounts_status" in idxs
+        assert "idx_emails_status" in idxs
+        assert "idx_logs_created_at" in idxs
+        assert "idx_tasks_status" in idxs
+
+    def test_index_idempotent_reinit(self, isolated_db):
+        """重复 init_db 不报错（CREATE INDEX IF NOT EXISTS 幂等）。"""
+        db.init_db()
+        db.init_db()
+        with db.db_session() as conn:
+            assert "idx_accounts_status" in {r["name"] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'").fetchall()}

@@ -151,6 +151,10 @@ GPT-Auto-Register/
 | `log_retention_days` | 运行日志保留天数（超过自动清理） | `30` |
 | `chatgpt2api_url` | chatgpt2api 地址 | `http://127.0.0.1:23456` |
 | `chatgpt2api_admin_key` | chatgpt2api 管理密钥（留空自动读取） | - |
+| `cf_retry_max` | CF 挑战解不开时换代理重试次数（0=不重试直接 cf_blocked） | `2` |
+
+> **日志容量上限**（`services/db.py` 常量）：`MAX_LOG_ROWS=20000`，超量自动删旧，防单日高频爆量。无需配置。
+> **CF Solver 端口**：固定 `8001`，随 `启动.bat` 自动拉起，`/api/healthz` 的 `cf_solver` 字段反映其状态。
 
 ---
 
@@ -188,6 +192,26 @@ GPT-Auto-Register/
    kookeey 代理账密从 `proxies.txt` 自动解析。
 4. **日志脱敏**：验证码不再明文写入日志；敏感配置对外掩码为 `******`（`auth_enforced` 布尔开关除外）。
 5. **外部暴露**：若服务暴露公网，务必配置 Nginx 反向代理 + HTTPS + 限制 `/api/*` 来源，并设置真实 `auth_key`。
+6. **健康检查**：部署探活用 `GET /api/healthz`（无需鉴权），返回 `db/cf_solver/browser_pool_size/version/auth` 状态。
+   ```bash
+   curl http://localhost:23457/api/healthz
+   # {"status":"ok","db":"ok","cf_solver":"ok","browser_pool_size":0,"auth":"enabled","version":"2.2.0"}
+   ```
+   - `cf_solver=unknown` 表示 CF Solver(:8001) 未启动，注册遇 CF 挑战时会降级 `cf_blocked`。
+   - `browser_pool_size` 为 0 正常（camoufox 按需启动，A5 浏览器池落地后改持久池）。
+
+---
+
+## 🔧 排障速查
+
+| 现象 | 排查方向 |
+|------|---------|
+| 双击 `启动.bat` 闪退 | 见上「双击启动排障」；纯 ASCII + ping 替代 timeout + chcp 绝对路径 |
+| `verify_account_login` 180s 超时强杀 | 现已形态分流早退；看 `data/refresh_results.jsonl` 的 `reason`：`cf_blocked`/`unknown_page`/`timeout` |
+| 注册遇 CF 一直 `cf_blocked` | 换代理出口 IP（`proxies.txt`）；CF Solver(:8001) 是否 Listen |
+| 页面改版 verify 返回 `unknown_page` | 看 `data/debug/verify_unknown_*.png` 截图 + 日志页面文字摘要，适配新选择器 `services/browser_selectors.py` |
+| 日志表越来越大 | `log_retention_days` 配置保留天数（默认 30）；`MAX_LOG_ROWS=20000` 硬上限自动删旧 |
+| SQLite `database is locked` | 并发写已用 `db_session` + WAL；若仍锁，降 `register_concurrency` |
 
 ---
 
