@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>v2.2 生产级增强变更报告</title>
+<style>
+:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#c9d1d9;--muted:#8b949e;--green:#3fb950;--red:#f85149;--yellow:#d29922;--blue:#58a6ff}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,"Segoe UI",system-ui,sans-serif;background:var(--bg);color:var(--text);line-height:1.7;padding:20px;max-width:980px;margin:0 auto}
+h1{color:var(--blue);border-bottom:1px solid var(--border);padding-bottom:10px;margin-bottom:20px;font-size:1.6em}
+h2{color:var(--green);margin:30px 0 12px;font-size:1.25em;border-left:3px solid var(--green);padding-left:10px}
+h3{color:var(--blue);margin:18px 0 8px;font-size:1.05em}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px;margin:12px 0}
+.code{background:#1f2428;border:1px solid var(--border);border-radius:4px;padding:10px;font-family:"Consolas",monospace;font-size:0.9em;overflow-x:auto;color:#e6edf3;white-space:pre-wrap;margin:8px 0}
+.tag{display:inline-block;padding:2px 8px;border-radius:12px;font-size:0.8em;font-weight:600;margin:0 4px}
+.p0{background:rgba(248,81,73,.2);color:var(--red);border:1px solid var(--red)}
+.p1{background:rgba(210,153,34,.2);color:var(--yellow);border:1px solid var(--yellow)}
+.p2{background:rgba(63,185,80,.15);color:var(--green);border:1px solid var(--green)}
+.done{color:var(--green)}
+.todo{color:var(--yellow)}
+ul{margin:10px 0 10px 24px}li{margin:4px 0}
+.quiz{background:#0d2137;border:1px solid var(--blue);border-radius:8px;padding:16px;margin:16px 0}
+.quiz q{display:block;margin:10px 0;font-weight:600}
+.quiz .ans{color:var(--muted);font-size:.9em;margin-top:6px}
+.summary-box{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:16px 0}
+.summary-box .stat{text-align:center;background:var(--card);padding:14px;border-radius:8px;border:1px solid var(--border)}
+.stat .num{font-size:1.8em;font-weight:700;color:var(--blue)}
+.stat .lbl{color:var(--muted);font-size:.85em}
+footer{margin-top:40px;padding-top:16px;border-top:1px solid var(--border);color:var(--muted);font-size:.85em}
+</style>
+</head>
+<body>
+<h1>v2.2 生产级增强变更报告</h1>
+<p style="color:var(--muted)">GPT 自动注册项目 · 2026-08-06 · 基于证据，非理想状态</p>
+
+<div class="summary-box">
+<div class="stat"><div class="num">7</div><div class="lbl">闭环任务</div></div>
+<div class="stat"><div class="num">217+</div><div class="lbl">pytest 全绿</div></div>
+<div class="stat"><div class="num">206</div><div class="lbl">新增行</div></div>
+</div>
+
+<h2>1. 上下文与直觉</h2>
+<div class="card">
+<p>用户要求"把所有都完整落地闭环清楚"。诚实盘点发现 v2.1 的 6 项长尾（D3/L4/M4/L5/B5/D1）真实可做且单机能闭环。校准发现 D1（reset_stale_tasks）已在 v2.0 闭环，免重修。本轮聚焦其余 5 项 + 治理资产。</p>
+</div>
+
+<h2>2. 做了什么</h2>
+
+<h3>D3: 健康检查 /api/healthz <span class="tag p1">P1</span></h3>
+<div class="card">
+<p>原 healthz 只返回 db/auth。扩展为生产级探活：</p>
+<ul>
+<li><strong>db</strong>: SELECT 1 探测可达</li>
+<li><strong>cf_solver</strong>: socket connect_ex 到 127.0.0.1:8001，返回 ok/unknown</li>
+<li><strong>browser_pool_size</strong>: camoufox 实例数（A5 浏览器池落地后改为 len(pool)）</li>
+<li><strong>version</strong>: 2.2.0</li>
+</ul>
+<div class="code">GET /api/healthz →
+{ "status":"ok", "db":"ok", "cf_solver":"ok",
+  "browser_pool_size":0, "auth":"enabled", "version":"2.2.0" }</div>
+</div>
+
+<h3>L4: get_stats 聚合 SQL <span class="tag p2">P2</span></h3>
+<div class="card">
+<p>原 9 次独立 COUNT 查询（emails 3 + accounts 6），合并为 1 条带子查询的聚合 SQL。返回字段结构完全不变。</p>
+<div class="code">SELECT (SELECT COUNT(*) FROM emails) AS emails_total,
+       (SELECT COUNT(*) FROM emails WHERE status='pending') AS emails_pending, ...</div>
+</div>
+
+<h3>M4: logs 表容量上限 <span class="tag p2">P2</span></h3>
+<div class="card">
+<p>原 logs 表无硬上限（虽有 purge_old_logs 按天数清理，但单日高频爆量仍会撑大）。新增：</p>
+<ul>
+<li><code>MAX_LOG_ROWS = 20000</code> 硬上限常量</li>
+<li>add_log 每 100 次插入触发一次 <code>DELETE WHERE id &lt;= MAX(id) - 20000</code>（避免每次插入都跑 DELETE 子查询）</li>
+<li>api/logs limit 校验 <code>≤ 2000</code>，防前端一次拉超量</li>
+</ul>
+<p>边界验证：MAX(id)=100、MAX_LOG_ROWS=20000 时 <code>id &lt;= -19990</code> 永假删 0 条 ✓ 安全。</p>
+</div>
+
+<h3>L5: 优雅停机 <span class="tag p2">P2</span></h3>
+<div class="card">
+<p>uvicorn shutdown 回调关浏览器池 + CF solver。CF Solver stop() 已存在（cf_solver_service.py:69）。</p>
+</div>
+
+<h3>B5: 常量收敛 <span class="tag p2">P2</span></h3>
+<div class="card">
+<p>protocol_register/revive_import 的 OAUTH 常量迁移到 services/constants.py，保留别名（OAUTH_REDIRECT_URI as REDIRECT_URI）向后兼容。rg 确认主链路无散落硬编码，仅剩 chatgpt2api 对接脚本 3 处语义不同的 client_id（保留）。</p>
+</div>
+
+<h3>D1: 断点续跑 <span class="tag p2">校准已闭环</span></h3>
+<div class="card">
+<p>校准发现 reset_stale_tasks 已在 v2.0 闭环（services/db.py:313 + main.py:44 调用）。免重修。</p>
+</div>
+
+<h2>3. 验证证据</h2>
+<div class="card">
+<ul>
+<li class="done">✅ pytest tests/ -q → 217+ 全绿（新增 M4容量 + L4聚合 + D3健康字段测试）</li>
+<li class="done">✅ B5: import 验证 protocol/revive 常量别名向后兼容</li>
+<li class="done">✅ L4: get_stats 返回字段与计数与单条 COUNT 一致</li>
+<li class="done">✅ M4 边界：MAX(id) &lt; MAX_LOG_ROWS 时删 0 条，安全</li>
+<li class="todo">⚠️ L5 shutdown 回调仅代码实现，未冒烟验证 uvicorn 信号真的触发</li>
+</ul>
+</div>
+
+<h2>4. 诚实边界（未闭环，沉淀 tasks.md 长尾）</h2>
+<div class="card">
+<ul>
+<li class="todo">H3 浏览器池复用（CamoufoxPool）</li>
+<li class="todo">F1-F7 前端 UI/UX 全面升级</li>
+<li class="todo">G1 token 保鲜后台任务</li>
+<li class="todo">B1 双引擎统一（registration_flow.py）</li>
+<li class="todo">A4/A6 失败分级与重试策略 + 并发落地</li>
+<li class="todo">H1 工程测试套件扩展至 ≥90%</li>
+<li class="todo">启动.bat 去重复安装 / M10 硬编码凭据迁移 / L1-L5 前端打磨</li>
+</ul>
+</div>
+
+<h2>5. 变更测验</h2>
+<div class="quiz">
+<p>以下测验必须通过，确认你理解本次变更：</p>
+
+<q>Q1: /api/healthz 现在返回哪些新字段？</q>
+<div class="ans">答：db / cf_solver / browser_pool_size / version（cf_solver 用 socket connect_ex 探 8001 端口）。</div>
+
+<q>Q2: get_stats 聚合 SQL 用什么方式替代 9 次 COUNT？返回结构变了吗？</q>
+<div class="ans">答：1 条带子查询的 SELECT（每个字段是独立子查询 COUNT）。返回字段结构完全不变，前端无需改。</div>
+
+<q>Q3: M4 的 MAX_LOG_ROWS 是多少？add_log 每次插入都清理吗？</q>
+<div class="ans">答：20000。不是每次——每 100 次插入才检查一次，避免高频写入时 DELETE 子查询拖慢。</div>
+
+<q>Q4: M4 边界：当 MAX(id)=100 但 MAX_LOG_ROWS=20000 时，DELETE 会删全表吗？</q>
+<div class="ans">答：不会。WHERE id &lt;= (100 - 20000) = id &lt;= -19990，永假，删 0 条。安全。</div>
+
+<q>Q5: B5 常量收敛后，protocol_register 的 REDIRECT_URI 和原值一致吗？旧 import 破坏吗？</q>
+<div class="ans">答：一致。用 `from services.constants import OAUTH_REDIRECT_URI as REDIRECT_URI` 别名，旧 `from protocol_register import REDIRECT_URI` 不破坏。</div>
+
+<q>Q6: D1 断点续跑为什么没在本轮新做？</q>
+<div class="ans">答：校准发现 reset_stale_tasks 已在 v2.0 闭环（db.py:313 + main.py:44 调用）。不重复审计已修项是宪法要求。</div>
+</div>
+
+<footer>
+<p>本报告由 final-audit-workflow 工作流生成 · 证据驱动 · 禁止伪闭环</p>
+<p>关联：commit 1cf480e · tag v2.2 · ADR-005</p>
+</footer>
+</body>
+</html>

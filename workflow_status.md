@@ -157,3 +157,30 @@
 - mock 测试不等于真实闭环：verify 的 CF/unknown 分流只过 mock，真实 camoufox 行为未验证——需诚实标注
 - 常量收敛要向后兼容：browser_register 内联常量改 import 时，保留模块级别名，旧 `from browser_register import OAUTH_CLIENT_ID` 不破坏
 - OTP 三合一行为对齐：原三份兜底都是 max（不是 first），统一时必须保持一致，否则静默行为变更
+
+## 十、v2.2 生产级增强任务状态（2026-08-06）
+
+### 背景
+用户要求"把所有都完整落地闭环清楚"。诚实盘点 v2.1 长尾的 6 项，5 项真实可做 + 1 项校准已闭环。
+
+### 任务闭环状态
+
+| 任务 | 状态 | 证据 |
+|------|------|------|
+| D3 /api/healthz 扩展 | ✅ | api/__init__.py db/cf_solver/browser_pool_size/version |
+| L4 get_stats 聚合SQL | ✅ | db.py 9次COUNT→1条聚合，返回结构不变 |
+| M4 logs表容量上限 | ✅ | MAX_LOG_ROWS=20000 + 每100次插入清理 + limit≤2000 |
+| L5 优雅停机 | ✅ | @app.on_event("shutdown") 关浏览器池+CF solver |
+| B5 常量收敛 | ✅ | protocol_register/revive_import 迁移 constants，别名向后兼容 |
+| D1 断点续跑 | ✅ 校准已闭环(v2.0) | db.py:313 reset_stale_tasks + main.py:44 调用 |
+| 提交推送v2.2 | ✅ | commit 1cf480e + tag v2.2 + push origin main |
+
+### 验证历史（v2.2，勿重复审计）
+- 全量：`./.venv/Scripts/python.exe -m pytest tests/ -q` → 217+ 全绿
+- 新增测试：M4容量上限（临时降MAX_LOG_ROWS到50验证）+ L4聚合SQL返回字段+计数一致 + D3 healthz新字段断言
+- B5 import 验证：protocol/revive 常量别名向后兼容
+- M4 边界验证：MAX(id)<MAX_LOG_ROWS 时 DELETE 永假删0条，安全
+
+### 诚实边界（未闭环，沉淀tasks长尾）
+- L5 shutdown 回调仅代码实现，未冒烟验证 uvicorn 信号真的触发
+- H3浏览器池/F前端系列/G1 token保鲜/B1双引擎统一/A4A6失败分级+并发/H1测试套件≥90% 长尾
