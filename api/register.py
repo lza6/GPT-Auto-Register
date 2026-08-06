@@ -259,16 +259,29 @@ def _refresh_oauth(refresh_token: str, proxy_url: str | None = None) -> dict | N
 
 
 def _build_chatgpt2api_account(acc: dict, token_data: dict) -> dict:
-    return {
+    """构建 chatgpt2api 账号载荷。
+
+    字段对齐 chatgpt2api 导入契约（api/accounts.py + services/account_service.py 实证）：
+    - password 必须是 **OpenAI 账号密码**（chatgpt2api 凭据登录/重登用），不是微软邮箱密码。
+    - mail_credential = {client_id, refresh_token(微软邮箱)}，供 chatgpt2api 凭据过期后 OTP 重登取码。
+    """
+    payload = {
         "access_token": token_data["access_token"],
         "refresh_token": token_data["refresh_token"],
         "id_token": token_data.get("id_token", ""),
         "email": acc.get("email", ""),
-        "password": acc.get("password", ""),
+        # 关键修复：OpenAI 账号密码优先（重登用），回退微软邮箱密码
+        "password": acc.get("openai_password") or acc.get("password") or "",
         "type": "free",
         "status": "正常",
         "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
     }
+    # 邮箱取件凭证（client_id + 微软 refresh_token）：chatgpt2api 凭据重登取 OTP 用
+    client_id = (acc.get("client_id") or "").strip()
+    mail_rt = (acc.get("refresh_token") or "").strip()
+    if client_id and mail_rt:
+        payload["mail_credential"] = {"client_id": client_id, "refresh_token": mail_rt}
+    return payload
 
 
 # 导出时 OAuth 并发刷新上限（避免大量账号时打爆 OpenAI 限流）
@@ -433,3 +446,51 @@ async def push_chatgpt2api() -> dict:
     except Exception as e:
         add_log("error", f"推送 chatgpt2api 失败: {e}")
         return {"success": False, "error": str(e), "pushed": 0}
+
+
+@router.post("/replenish-tokens")
+async def replenish_tokens() -> dict:
+    """一键补齐 Token：为「有 openai_refresh_token 但缺有效 access_token」的账号刷新补齐。
+
+    复用 token_refresher 的刷新链路（走代理 + TLS 校验 + 轮换新 RT 一并落库）。
+    无法自动补齐的（连 openai_refresh_token 都没有）如实报为 need_reregister，不假装补齐。
+    """
+    config = _load_config()
+    from services.token_refresher import get_token_refresher
+    refresher = get_token_refresher(config)
+
+    with db_session() as conn:
+        rows = conn.execute(
+            "SELECT email, openai_refresh_token FROM accounts "
+            "WHERE status IN ('success','success_no_token') "
+            "AND (access_token IS NULL OR access_token = '' OR access_token NOT LIKE 'eyJ%')"
+        ).fetchall()
+    targets = [dict(r) for r in rows if (r["openai_refresh_token"] or "").strip()]
+    no_rt = len(rows) - len(targets)  # 连 refresh_token 都没有 → 无法自动补齐，需重新注册
+
+    if not targets:
+        return {"success": True, "replenished": 0, "failed": 0,
+                "need_reregister": no_rt, "note": "没有可补齐的账号"}
+
+    sem = asyncio.Semaphore(5)
+    result = {"replenished": 0, "failed": 0}
+
+    async def _one(acc: dict) -> None:
+        async with sem:
+            try:
+                tokens = await refresher._refresh_token(acc["openai_refresh_token"])
+                if tokens and tokens.get("access_token"):
+                    # 轮换的新 RT 一并落库（防库存 RT 被 OpenAI 重用检测耗尽）
+                    refresher._update_tokens(acc["email"], tokens["access_token"], tokens.get("refresh_token", ""))
+                    result["replenished"] += 1
+                else:
+                    result["failed"] += 1
+            except Exception as e:
+                add_log("warning", f"补齐 token [{acc['email']}] 异常: {e}")
+                result["failed"] += 1
+
+    await asyncio.gather(*(_one(a) for a in targets))
+    add_log("info",
+            f"一键补齐 token：补 {result['replenished']}，失败 {result['failed']}，"
+            f"无RT需重新注册 {no_rt}，共扫 {len(rows)}")
+    return {"success": True, "scanned": len(rows), "need_reregister": no_rt, **result}

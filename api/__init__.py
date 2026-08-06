@@ -246,6 +246,15 @@ def create_app() -> FastAPI:
     app.include_router(settings_router.router, prefix="/api/settings", tags=["settings"])
     app.include_router(proxies_router.router, prefix="/api/proxies", tags=["proxies"])
 
+    # v3.1.2：静态资源 no-cache，强制浏览器每次校验拉取最新 UI（git pull 后无需强刷/清缓存）
+    @app.middleware("http")
+    async def _static_no_cache(request, call_next):
+        resp = await call_next(request)
+        path = request.url.path
+        if path == "/" or path.endswith((".html", ".js", ".css")):
+            resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return resp
+
     # 静态文件（前端）
     web_dist = Path(__file__).resolve().parent.parent / "web_dist"
     if web_dist.exists():

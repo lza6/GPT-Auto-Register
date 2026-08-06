@@ -329,3 +329,24 @@ v3.0 后端能力已落地（浏览器池/schema/双引擎契约/token巡检/代
 ### 复现坑（本轮新增）
 - **测试单例隔离**：get_engine/get_protocol_register 等模块级单例跨测试残留 → 单独跑过、全量跑挂。conftest autouse 重置解决。这是"覆盖率高但上线出 bug"的测试可靠性根因之一
 - **cmd for/f 与 python 括号**：for /f ('python -c ...') 遇 python 代码里的 ) 提前闭合命令串静默失败 → 读 config 用 python 写临时文件 + set/p
+
+## 十五、chatgpt2api 导出适配 + 一键补齐 + UI 完备 + 最新UI（2026-08-07）
+
+### 需求（用户真实痛点）
+导出是否适配 chatgpt2api 导入？要有账号+密码+token；不齐能否一键补齐；UI 是否显示全 chatgpt2api 所需；启动是否总加载最新代码/UI。
+
+### 实证 chatgpt2api 导入契约（读其 api/accounts.py + services/account_service.py）
+- POST /api/accounts 双分流：有 access_token 走 token 直入（_prepare_account_payload 保留全字段）；无 token 但有 email+password 走 add_password_accounts 自动登录抓 token
+- **password 必须是 OpenAI 账号密码**（重登用），mail_credential={client_id,微软RT} 供 OTP 重登取码
+
+### 修复/新增
+| 项 | 内容 | 验证 |
+|---|------|------|
+| 导出字段错配修复 | password 微软密码→openai_password；新增 mail_credential={client_id,微软RT} | 用 chatgpt2api 自己的 _prepare_account_payload 跑我们的载荷，全字段被接受保留 |
+| 一键补齐Token | POST /api/register/replenish-tokens：有RT缺AT的账号刷新补齐（轮换新RT落库）；无RT如实标 need_reregister | 3 单测（成功/无RT/不误刷有效账号） |
+| 推送按钮补位 | UI 新增「🚀 推送 chatgpt2api」（端点早就有了但一直没按钮——正是"导出时才能那样"的断点） | curl/页面实证按钮就位 |
+| UI 显示完全 | 注册记录表新增「OpenAI密码」列 + 「c2api就绪」徽章列（AT/RT/密/取件 四项齐备度） | curl 伺服页面含全部新元素 |
+| 最新 UI | 静态资源加 Cache-Control no-cache，浏览器每次校验拉最新（git pull 后无需强刷） | 实证 /app.js 带 no-cache 头 |
+
+### 测试
+- 新增 tests/test_c2api_compat.py 8 项（字段映射/补齐三态/no-cache 头），全量 **283 全绿**

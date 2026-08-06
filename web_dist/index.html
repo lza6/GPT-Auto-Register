@@ -45,6 +45,8 @@
       <button class="btn btn-danger" id="btnStop" onclick="controlRegister('stop')" disabled>⏹️ 停止</button>
       <button class="btn btn-primary" onclick="exportTokens()">📋 导出 Token</button>
       <button class="btn btn-primary" onclick="openExportAccounts()">📤 导出账号</button>
+      <button class="btn btn-primary" onclick="replenishTokens()" title="为有 refresh_token 但缺 access_token 的账号刷新补齐">🔧 一键补齐Token</button>
+      <button class="btn btn-success" onclick="pushToChatgpt2api()" title="推送成功账号（含三件套+取件凭证）到 chatgpt2api 账号池">🚀 推送 chatgpt2api</button>
       <button class="btn btn-danger" onclick="openClear()" style="margin-left:auto">🗑️ 一键清空库</button>
     </div>
     <div class="progress-bar" id="progressBar"><div class="fill" id="progressFill"></div></div>
@@ -82,7 +84,7 @@
       </div>
       <div style="overflow-x:auto">
       <table>
-        <thead><tr><th>#</th><th>邮箱</th><th>密码</th><th>姓名</th><th>生日</th><th>状态</th><th>代理</th><th>Token</th><th>错误</th><th>时间</th></tr></thead>
+        <thead><tr><th>#</th><th>邮箱</th><th>OpenAI密码</th><th>姓名</th><th>生日</th><th>状态</th><th>代理</th><th>Token</th><th>c2api就绪</th><th>错误</th><th>时间</th></tr></thead>
         <tbody id="accountsBody"></tbody>
       </table>
       </div>

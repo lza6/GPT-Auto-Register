@@ -241,10 +241,25 @@ GPT-Auto-Register/
 
 ## 🔗 对接 chatgpt2api
 
-控制台「📤 导出账号」→「chatgpt2api 格式」会导出含 `access_token` 的 JSON，
-可直接粘贴到 chatgpt2api 账号池，或在设置里配置 `chatgpt2api_url` / `chatgpt2api_admin_key` 后调用后端推送端点。
+本项目导出/推送已**按 chatgpt2api 的导入契约逐项适配**（实证其 `api/accounts.py` + `services/account_service.py`）。
 
-> 详见 `scripts/import_to_chatgpt2api.py`（命令行导入）与 `scripts/auto_register_import.py`（注册→导入闭环）。
+**导出字段与 chatgpt2api 的对应关系**：
+
+| 我们导出 | chatgpt2api 用途 |
+|---------|-----------------|
+| `access_token` / `refresh_token` / `id_token` | OAuth 三件套（直接使用 + 自动刷新） |
+| `email` | 账号邮箱 |
+| `password` | **OpenAI 账号密码**（凭据重登用；v3.1.1 起修正，非微软邮箱密码） |
+| `mail_credential` | `{client_id, refresh_token(微软邮箱)}`，chatgpt2api 凭据过期后 OTP 重登取码用 |
+
+**三种对接方式**（控制台「操作控制」区）：
+- **📤 导出账号**：账号密码清单（`邮箱----OpenAI密码`）或 chatgpt2api 格式 JSON。
+- **🔧 一键补齐Token**：为「有 refresh_token 但缺 access_token」的账号刷新补齐（轮换新 RT 自动落库）；连 RT 都没有的会如实标 `need_reregister`。
+- **🚀 推送 chatgpt2api**：把所有成功账号（含三件套 + OpenAI密码 + 取件凭证）推送到 chatgpt2api 账号池，需先设 `chatgpt2api_url` / `chatgpt2api_admin_key`。
+
+**注册记录表的「c2api就绪」列**：用 AT/RT/密/取件 四个徽章直观显示每个账号对 chatgpt2api 的凭证齐备度（✓齐/✗缺），不齐的点「一键补齐Token」。
+
+> 命令行对接见 `scripts/import_to_chatgpt2api.py`、`scripts/auto_register_import.py`。
 
 ---
 

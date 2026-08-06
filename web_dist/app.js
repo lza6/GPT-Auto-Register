@@ -191,6 +191,20 @@ function tokenCell(v) {
   return `<span class="mono ellipsis copyable" title="${escapeHtml(v)}" data-full="${escapeHtml(v)}" onclick="copyFrom(this)">${escapeHtml(v.slice(0,28))}…</span>`;
 }
 
+// v3.1.2：chatgpt2api 就绪度徽章——一眼看清四项关键凭证是否齐备
+// AT=access_token, RT=openai_refresh_token, 密=OpenAI密码, 取件=mail_credential(client_id+微软RT)
+function c2apiReadyCell(a) {
+  const items = [
+    ['AT', !!(a.access_token && String(a.access_token).startsWith('eyJ')), 'access_token'],
+    ['RT', !!a.openai_refresh_token, 'openai_refresh_token'],
+    ['密', !!(a.openai_password || a.password), 'OpenAI密码'],
+    ['取件', !!(a.client_id && a.refresh_token), '取件凭证(client_id+微软refresh_token)'],
+  ];
+  return items.map(([label, ok, tip]) =>
+    `<span class="tag ${ok ? 'success' : 'failed'}" title="${tip}${ok ? '：已具备' : '：缺失'}" style="margin-right:2px">${label}${ok ? '✓' : '✗'}</span>`
+  ).join('');
+}
+
 // ── 导入邮箱 ──
 function openImport() {
   const src = document.getElementById('cfgEmailSource').value || '';
@@ -276,6 +290,28 @@ async function exportTokens() {
   } catch (e) { alert('导出失败: ' + e.message); }
 }
 
+// v3.1.2：一键补齐 Token（为有 openai_refresh_token 但缺有效 access_token 的账号刷新补齐）
+async function replenishTokens() {
+  if (!confirm('为有 refresh_token 但缺 access_token 的账号刷新补齐？\n（会真实调用 OpenAI 刷新，轮换的新 RT 自动落库）')) return;
+  toast('补齐中...');
+  try {
+    const d = await api('/register/replenish-tokens', { method: 'POST', body: '{}' });
+    toast(`补齐完成：成功 ${d.replenished} · 失败 ${d.failed} · 无RT需重新注册 ${d.need_reregister || 0}`);
+    loadAccounts(); refreshStatus();
+  } catch (e) { alert('补齐失败: ' + e.message); }
+}
+
+// v3.1.2：推送成功账号到 chatgpt2api 账号池（含三件套 + 取件凭证 mail_credential）
+async function pushToChatgpt2api() {
+  if (!confirm('把所有成功账号推送到 chatgpt2api 账号池？\n（含 access_token/refresh_token/id_token + OpenAI密码 + 取件凭证）')) return;
+  toast('推送中...');
+  try {
+    const d = await api('/register/push-chatgpt2api', { method: 'POST', body: '{}' });
+    if (d.success === false) { alert('推送失败: ' + (d.error || '未知错误')); return; }
+    toast(`已推送 ${d.pushed} 个账号到 chatgpt2api（HTTP ${d.status}）`);
+  } catch (e) { alert('推送失败: ' + e.message); }
+}
+
 function openClear() {
   openModal('🗑️ 一键清空库', `
     <div class="warn">⚠️ 该操作将<b>永久删除</b>：注册记录（accounts）、邮箱池（emails）、任务记录（tasks）。运行日志将保留。建议先「导出 Token」备份。</div>
@@ -331,12 +367,13 @@ async function loadAccounts(manual) {
       return `<tr>
         <td>${accPage * ACC_PAGE_SIZE + i + 1}</td>
         <td class="mono">${escapeHtml(a.email)}</td>
-        <td>${pwCell(a.password)}</td>
+        <td>${pwCell(a.openai_password || a.password)}</td>
         <td>${escapeHtml(a.name || '-')}</td>
         <td>${escapeHtml(a.birthdate || '-')}</td>
         <td>${statusTag}</td>
         <td class="mono">${escapeHtml(a.proxy || '直连')}</td>
         <td>${tokenCell(a.access_token)}</td>
+        <td style="white-space:nowrap">${c2apiReadyCell(a)}</td>
         <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis">${escapeHtml(a.error || '-')}</td>
         <td style="white-space:nowrap">${time}</td>
       </tr>`;
