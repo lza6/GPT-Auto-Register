@@ -297,3 +297,9 @@ v3.0 后端能力已落地（浏览器池/schema/双引擎契约/token巡检/代
 - **改 .bat 注释绝不能写中文**：本轮我一度在 bat 注释写中文（132/39 非 ASCII 字节），触发 ADR-004 红线。字节级检查（非 ASCII=0）是改 bat 后的必做验证
 - **OpenAI refresh_token 轮换有重用检测**：旧 RT 用 2-3 次后返回 refresh_token_reused 401。任何刷新都必须落库新 RT。实测用掉 2 个真实账号的 RT 链（dbf/xww）
 - **对抗验证很有价值**：审计员的 otp 默认值 P1 被验证裁定为影响高估（实际 P2 一致性）；新 RT 落库从 P3 被我真实测试升级回 P1
+
+### 审计轮闭环（v3.1.1 已发布）
+- 提交 `d5247ed` + tag `v3.1.1` + push origin main + GitHub Release v3.1.1
+- 批判性复审循环：初判 Request Changes（C1 bat伪修复/H1 root泄密/H2 verify漏改/R1-R5）→ 主线程修复 → 复验 **Approve**（无 Blocking/High/Required 残留）
+- HTML 报告 docs/CHANGE_REPORT_v3.1.1.html（含 7 题测验）；新增 add-feature 技能（.claude/skills/add-feature + docs/skills/add-feature.md 仓库副本）
+- 本轮净发现价值：PKCE 错配 + RT 轮换不落库两个潜伏生产级 bug（真实测试挖出）；纠正"旧 RT 不作废"过时记忆；bat for/f 伪修复被复审抓获
