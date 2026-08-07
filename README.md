@@ -31,6 +31,40 @@
 
 ---
 
+## 🖥️ 服务器部署（Docker，当前线上实例）
+
+线上已与 chatgpt2api 同机部署在腾讯云东京（`43.165.173.36`）。
+
+```bash
+# 仓库根目录已带 Dockerfile + docker-compose.yml
+cp config.example.json config.json   # 设置强 auth_key
+# 放入 proxies.txt（kookeey 住宅代理，每行一条）
+docker compose up -d
+```
+
+| 项 | 值 |
+|----|----|
+| 控制台 | `http://43.165.173.36:23457` |
+| 容器 | `gpt-register`（主服务 23457 + CF solver 8001 同容器自启 camoufox） |
+| 对接 chatgpt2api | config `chatgpt2api_url=http://host.docker.internal:23456`（compose 已配 `extra_hosts`） |
+
+**单容器内**：主服务（23457）按需自启 CF solver 子进程（camoufox 过 Cloudflare），无需单独编排。
+
+### 🛡️ 注册时「一账号一 IP」（防风控关键）
+
+**是的，每个注册账号走独立的住宅 IP。** 机制（`services/protocol_register.py:_register_sync` + `services/proxy_service.py`）：
+
+1. **每个账号注册时调一次 `_resolve_proxy()`** → 从代理池取下一个 kookeey 代理；
+2. kookeey 每次 `_kookeey_url()` 生成**随机 8 位 session** → 每个 session 对应一个**全新的美国住宅出口 IP**；
+3. **同一账号全流程（authorize → 取码 → 换 token）用同一个 IP**（防中途换 IP 触发风控）；
+4. **不同账号 = 不同随机 session = 不同 IP**（实测：连续取 3 个注册代理，出口 IP 分别是 `174.45.229.202` / `129.222.131.52` / `67.164.130.76`，全不同）。
+
+> 前提：`config.json` 里 `use_proxy=true` 且 `proxy_url` 留空（走代理池），`proxies.txt` 配 kookeey。若设了 `proxy_url` 固定值，则所有账号共用一个 IP（不推荐，易被风控）。
+
+**对比**：chatgpt2api（23456 消费侧）是**粘性 session**（`md5(email)[:8]` → 同号同 IP，账号长期稳定）；注册侧是**随机 session**（每次注册新 IP，避免新号同 IP 批量注册被风控）。两者策略不同但都是「一号一 IP」。
+
+---
+
 ## 🚀 快速开始（Windows）
 
 ```bash
