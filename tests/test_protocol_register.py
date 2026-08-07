@@ -205,8 +205,9 @@ class TestPerAccountProxy:
         """单账号全流程同一出口；不同账号不同出口（池轮换）。"""
         captured = {}
 
-        def fake_make_session(self, proxy_url=""):
+        def fake_make_session(self, proxy_url="", fingerprint="chrome"):
             captured["session_proxy"] = proxy_url
+            captured["fingerprint"] = fingerprint
             return FakeSession(
                 get_resp=FakeResp(200, url="https://auth.openai.com/create-account/password"),
                 post_map={
@@ -216,7 +217,7 @@ class TestPerAccountProxy:
                 },
             )
 
-        def fake_exchange(self, code, verifier, proxy_url=""):
+        def fake_exchange(self, code, verifier, proxy_url="", fingerprint="chrome", ua=""):
             captured["exchange_proxy"] = proxy_url
             return {"access_token": "at", "refresh_token": "rt", "id_token": "it"}
 

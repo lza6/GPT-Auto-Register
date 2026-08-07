@@ -46,6 +46,9 @@ _CONFIG_SCHEMA: dict[str, tuple[tuple[type, ...], Any, bool]] = {
     "cf_retry_max": ((int,), 2, False),
     # v3.1 安全审计：TLS 证书校验开关（默认 true，SSL 拦截代理可设 false）
     "tls_verify": ((bool, str), True, False),
+    # 一账号一指纹（v3.3）：TLS 指纹固定值/自定义池（空=默认 Chrome 池随机）
+    "tls_fingerprint": ((str,), "", True),
+    "tls_fingerprint_pool": ((str,), "", True),
 }
 
 

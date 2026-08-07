@@ -120,6 +120,19 @@ class ProtocolRegister:
         # 固定代理覆盖项：设置后所有账号共用该出口（优先级高于代理池）
         self.proxy_url = config.get("proxy_url") or ""
         self.mail_api = (config.get("email_api_base") or MAIL_API).rstrip("/")
+        # 一账号一指纹：不在实例存可变指纹（单例并发注册会竞态），改为每次注册按需生成
+        # （_register_sync 开头 _fresh_fingerprint 选一次，线程局部贯穿全流程，不同账号不同指纹）。
+
+    def _fresh_fingerprint(self) -> tuple[str, str]:
+        """为一次注册生成 (TLS指纹, 配套UA)。每账号调用一次 → 一账号一指纹。
+
+        UA：用户显式配 user_agent 则用它（向后兼容）；否则跟随指纹（防指纹/UA 矛盾被风控识别）。
+        """
+        from services.constants import pick_fingerprint, ua_for_fingerprint
+        fp = pick_fingerprint(self.config)
+        if str(self.config.get("user_agent") or "").strip():
+            return fp, self.ua
+        return fp, ua_for_fingerprint(fp)
 
     def _resolve_proxy(self) -> str:
         """每账号解析出口代理：config.proxy_url 固定优先 → use_proxy 时代理池取下一个 → 直连。
@@ -144,27 +157,28 @@ class ProtocolRegister:
         )
 
     # ── 工具 ─────────────────────────────────────
-    def _make_session(self, proxy_url: str = "") -> Any:
+    def _make_session(self, proxy_url: str = "", fingerprint: str = "chrome") -> Any:
         from curl_cffi import requests as cffi
 
-        session = cffi.Session(impersonate="chrome", verify=tls_verify_enabled(self.config), timeout=40)
+        # 一账号一指纹：用本账号选定的 TLS 指纹（非固定 chrome），防批量注册 JA3 聚类
+        session = cffi.Session(impersonate=fingerprint, verify=tls_verify_enabled(self.config), timeout=40)
         if proxy_url:
             session.proxies = {"http": proxy_url, "https": proxy_url}
         return session
 
-    def _sentinel_headers(self, session, device_id: str, flow: str) -> dict:
-        sentinel, oai_sc = build_sentinel_token(session, device_id, flow, user_agent=self.ua)
+    def _sentinel_headers(self, session, device_id: str, flow: str, ua: str = "") -> dict:
+        sentinel, oai_sc = build_sentinel_token(session, device_id, flow, user_agent=ua or self.ua)
         if oai_sc:
             session.cookies.set("oai-sc", oai_sc, domain=".openai.com")
         return {"openai-sentinel-token": sentinel}
 
-    def _base_headers(self, referer: str, device_id: str) -> dict:
+    def _base_headers(self, referer: str, device_id: str, ua: str = "") -> dict:
         return {
             "accept": "application/json",
             "accept-language": "zh-CN,zh;q=0.9",
             "content-type": "application/json",
             "referer": referer,
-            "user-agent": self.ua,
+            "user-agent": ua or self.ua,
             "oai-device-id": device_id,
         }
 
@@ -257,11 +271,13 @@ class ProtocolRegister:
             time.sleep(self.otp_poll)
         return None
 
-    def _exchange_code(self, code: str, verifier: str, proxy_url: str = "") -> dict | None:
+    def _exchange_code(self, code: str, verifier: str, proxy_url: str = "",
+                       fingerprint: str = "chrome", ua: str = "") -> dict | None:
         """code + verifier → access/refresh/id 三件套（可被测试 monkeypatch）。"""
         from curl_cffi import requests as cffi
 
-        session = cffi.Session(impersonate="chrome", proxy=proxy_url or None,
+        # 与 _make_session 同一指纹：换 token 与 authorize 同账号同一 TLS 指纹
+        session = cffi.Session(impersonate=fingerprint, proxy=proxy_url or None,
                                verify=tls_verify_enabled(self.config), timeout=60)
         try:
             r = session.post(
@@ -270,7 +286,7 @@ class ProtocolRegister:
                     "accept": "application/json", "content-type": "application/json",
                     "origin": "https://platform.openai.com",
                     "referer": "https://platform.openai.com/",
-                    "auth0-client": AUTH0_CLIENT, "user-agent": self.ua,
+                    "auth0-client": AUTH0_CLIENT, "user-agent": ua or self.ua,
                 },
                 json={
                     "client_id": OAUTH_CLIENT_ID, "code_verifier": verifier,
@@ -301,12 +317,16 @@ class ProtocolRegister:
         # 每账号解析一次出口代理并贯穿全流程（authorize/取码/换 token 同一出口 IP，
         # 防中途换 IP 触发风控）；kookeey 动态住宅每账号新 IP。
         proxy_url = self._resolve_proxy()
+        # 一账号一指纹：本账号选一次 TLS 指纹 + 配套 UA，贯穿全流程（authorize/取码/换token），
+        # 不同账号不同指纹（配合每账号独立 IP → 一账号一指纹一 IP，网络层+传输层双隔离）。
+        fingerprint, fp_ua = self._fresh_fingerprint()
         result: dict[str, Any] = {
             "email": email, "status": "failed", "error": "",
             "access_token": "", "refresh_token": "", "id_token": "",
             "openai_password": "", "name": "", "birthdate": "",
             # 只存 host:port 展示格式，不把 kookeey 账密写进库（与浏览器路径一致）
             "proxy": proxy_service.format_for_display(proxy_url) if proxy_url else "直连",
+            "fingerprint": fingerprint,
             "fallback_browser": False,
             "failure_type": "unknown",
         }
@@ -318,7 +338,7 @@ class ProtocolRegister:
         result["name"] = name
         result["birthdate"] = birthdate
 
-        session = self._make_session(proxy_url)
+        session = self._make_session(proxy_url, fingerprint)
         try:
             session.cookies.set("oai-did", device_id, domain=".auth.openai.com")
 
@@ -327,7 +347,7 @@ class ProtocolRegister:
                 _build_authorize_url(email, challenge),
                 headers={
                     "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "user-agent": self.ua,
+                    "user-agent": fp_ua,
                     "upgrade-insecure-requests": "1",
                 },
                 allow_redirects=True,
@@ -355,8 +375,8 @@ class ProtocolRegister:
             # ── 2a. create-account：设密码 ──
             if flow_kind == "create-account":
                 openai_password = gen_password()
-                h = self._base_headers(f"{AUTH_BASE}/create-account/password", device_id)
-                h.update(self._sentinel_headers(session, device_id, FLOW_REGISTER))
+                h = self._base_headers(f"{AUTH_BASE}/create-account/password", device_id, fp_ua)
+                h.update(self._sentinel_headers(session, device_id, FLOW_REGISTER, fp_ua))
                 r2 = session.post(f"{AUTH_BASE}/api/accounts/user/register",
                                   json={"password": openai_password, "username": email},
                                   headers=h)
@@ -367,7 +387,7 @@ class ProtocolRegister:
                     return result
                 r_send = session.get(f"{AUTH_BASE}/api/accounts/email-otp/send",
                                      allow_redirects=False,
-                                     headers=self._base_headers(f"{AUTH_BASE}/create-account/password", device_id))
+                                     headers=self._base_headers(f"{AUTH_BASE}/create-account/password", device_id, fp_ua))
                 if r_send.status_code != 200:
                     result["error"] = f"email-otp/send HTTP {r_send.status_code}"
                     result["fallback_browser"] = True
@@ -377,7 +397,7 @@ class ProtocolRegister:
             # ── 2b. log-in：passwordless 触发 OTP（半成品/已存在账号） ──
             else:
                 try:
-                    h = self._base_headers(f"{AUTH_BASE}/log-in/password", device_id)
+                    h = self._base_headers(f"{AUTH_BASE}/log-in/password", device_id, fp_ua)
                     r2 = session.post(f"{AUTH_BASE}/api/accounts/passwordless/send-otp",
                                       json={"username": email}, headers=h)
                     if r2.status_code != 200:
@@ -400,8 +420,8 @@ class ProtocolRegister:
                 return result
 
             # ── 4. email-otp/validate ──
-            h = self._base_headers(f"{AUTH_BASE}/email-verification", device_id)
-            h.update(self._sentinel_headers(session, device_id, FLOW_OTP))
+            h = self._base_headers(f"{AUTH_BASE}/email-verification", device_id, fp_ua)
+            h.update(self._sentinel_headers(session, device_id, FLOW_OTP, fp_ua))
             r3 = session.post(f"{AUTH_BASE}/api/accounts/email-otp/validate",
                               json={"code": code}, headers=h)
             j3 = r3.json() if r3.text else {}
@@ -413,8 +433,8 @@ class ProtocolRegister:
 
             # ── 5. about-you → create_account ──
             if "about-you" in continue_url:
-                h = self._base_headers(f"{AUTH_BASE}/about-you", device_id)
-                h.update(self._sentinel_headers(session, device_id, FLOW_CREATE))
+                h = self._base_headers(f"{AUTH_BASE}/about-you", device_id, fp_ua)
+                h.update(self._sentinel_headers(session, device_id, FLOW_CREATE, fp_ua))
                 r4 = session.post(f"{AUTH_BASE}/api/accounts/create_account",
                                   json={"name": name, "birthdate": birthdate}, headers=h)
                 j4 = r4.json() if r4.text else {}
@@ -432,7 +452,7 @@ class ProtocolRegister:
                 return result
 
             # ── 6. 换三件套 ──
-            tokens = self._exchange_code(cb_code, verifier, proxy_url)
+            tokens = self._exchange_code(cb_code, verifier, proxy_url, fingerprint, fp_ua)
             if not tokens or not tokens.get("access_token"):
                 result["error"] = "code 换 token 失败"
                 result["fallback_browser"] = True
