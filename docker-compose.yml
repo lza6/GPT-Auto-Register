@@ -1,0 +1,18 @@
+# GPT 自动注册 — 服务器部署 compose（与 chatgpt2api 同机）
+services:
+  register:
+    build: .
+    image: gpt-register:local
+    container_name: gpt-register
+    restart: unless-stopped
+    ports:
+      - "23457:23457"
+      # CF Solver 仅容器内部回环使用，不对外暴露（主服务自启子进程）
+    stop_grace_period: 20s
+    init: true
+    volumes:
+      - ./data:/app/data
+      - ./config.json:/app/config.json
+      - ./proxies.txt:/app/proxies.txt
+    environment:
+      - GPT_REGISTER_PORT=23457
