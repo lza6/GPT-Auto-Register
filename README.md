@@ -89,6 +89,14 @@ ip:port:user:pass
 http://ip:port
 ```
 
+**出口 IP 策略（v3.1.2 起，协议/浏览器/token 巡检全链路一致）**：
+- `config.proxy_url` 非空 → **所有账号共用该固定代理**（优先级最高，代理池不生效）
+- 未设 `proxy_url` 且 `use_proxy=true` → **每账号从代理池取下一个**：kookeey 动态住宅每次生成随机 session = 新出口 IP（真·一账号一 IP）；通用 HTTP 按行轮询
+- 两者都未配 → 直连（所有账号同一服务器 IP，批量注册易触发风控，**不建议**）
+- 单账号全流程（authorize → 取码 → 换 token）固定同一出口，不中途换 IP
+
+> **服务器部署批量注册**：删掉 `config.json` 里的 `proxy_url`，保持 `use_proxy: true`，在代理池填入 kookeey 动态住宅代理即可每账号独立 IP。
+
 ---
 
 ## 📂 目录结构

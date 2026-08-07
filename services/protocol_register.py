@@ -117,8 +117,23 @@ class ProtocolRegister:
         self.otp_min_age_window_sec = _as_int(config.get("otp_min_age_window_sec"), 120)
         self.otp_fallback_after_sec = _as_int(config.get("otp_fallback_after_sec"), 40)
         self.otp_backfill_window_min = _as_int(config.get("otp_backfill_window_min"), 15)
+        # 固定代理覆盖项：设置后所有账号共用该出口（优先级高于代理池）
         self.proxy_url = config.get("proxy_url") or ""
         self.mail_api = (config.get("email_api_base") or MAIL_API).rstrip("/")
+
+    def _resolve_proxy(self) -> str:
+        """每账号解析出口代理：config.proxy_url 固定优先 → use_proxy 时代理池取下一个 → 直连。
+
+        与 token_refresher._resolve_proxy 口径一致。kookeey 动态住宅每次 get_next
+        生成随机 session = 新出口 IP，实现「一账号一 IP」；通用 HTTP 代理按行轮询。
+        """
+        if self.proxy_url:
+            return self.proxy_url
+        use_proxy = self.config.get("use_proxy")
+        if use_proxy is True or (isinstance(use_proxy, str) and use_proxy.strip().lower() in ("1", "true", "yes", "on")):
+            from services.proxy_service import proxy_service
+            return proxy_service.get_next() or ""
+        return ""
 
     # ── 对外异步入口 ──────────────────────────────
     async def register_one(self, email: str, password: str, client_id: str,
@@ -129,12 +144,12 @@ class ProtocolRegister:
         )
 
     # ── 工具 ─────────────────────────────────────
-    def _make_session(self) -> Any:
+    def _make_session(self, proxy_url: str = "") -> Any:
         from curl_cffi import requests as cffi
 
         session = cffi.Session(impersonate="chrome", verify=tls_verify_enabled(self.config), timeout=40)
-        if self.proxy_url:
-            session.proxies = {"http": self.proxy_url, "https": self.proxy_url}
+        if proxy_url:
+            session.proxies = {"http": proxy_url, "https": proxy_url}
         return session
 
     def _sentinel_headers(self, session, device_id: str, flow: str) -> dict:
@@ -154,11 +169,11 @@ class ProtocolRegister:
         }
 
     # 98faka 同步取码（协议流程全程同步，无法用异步 email_service）
-    def _mail_api(self, path: str, payload: dict) -> dict:
+    def _mail_api(self, path: str, payload: dict, proxy_url: str = "") -> dict:
         resp = requests.post(
             self.mail_api + path,
             json=payload,
-            proxies={"http": self.proxy_url, "https": self.proxy_url} if self.proxy_url else None,
+            proxies={"http": proxy_url, "https": proxy_url} if proxy_url else None,
             headers={"content-type": "application/json", "user-agent": self.ua},
             timeout=30,
         )
@@ -180,14 +195,14 @@ class ProtocolRegister:
         except Exception:
             return dt.datetime.fromtimestamp(0)
 
-    def _code_from(self, card: dict, mail: dict) -> str | None:
+    def _code_from(self, card: dict, mail: dict, proxy_url: str = "") -> str | None:
         try:
             body = self._mail_api("/api/email-body", {
                 "email": card["email"],
                 "message_id": mail["id"],
                 "client_id": card["client_id"],
                 "refresh_token": card["refresh_token"],
-            })
+            }, proxy_url)
             html = body.get("body_html") or ""
             text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", html)).strip()
             if not text:
@@ -201,7 +216,7 @@ class ProtocolRegister:
         except Exception:
             return None
 
-    def _fetch_newest_otp(self, card: dict, after: dt.datetime) -> str | None:
+    def _fetch_newest_otp(self, card: dict, after: dt.datetime, proxy_url: str = "") -> str | None:
         """取 after 时间之后收到的【最新】验证码（可被测试 monkeypatch）。"""
         payload = {
             "email": card["email"], "password": card["password"],
@@ -213,14 +228,14 @@ class ProtocolRegister:
         consecutive_failures = 0
         while time.time() < deadline:
             try:
-                mails = self._mail_api("/api/emails", payload).get("data") or []
+                mails = self._mail_api("/api/emails", payload, proxy_url).get("data") or []
                 consecutive_failures = 0
                 window = dt.timedelta(seconds=self.otp_min_age_window_sec)
                 cands = [m for m in mails if self._is_otp_mail(m)
                          and self._mail_time(m) >= after - window]
                 if cands:
                     newest = max(cands, key=self._mail_time)
-                    code = self._code_from(card, newest)
+                    code = self._code_from(card, newest, proxy_url)
                     if code:
                         return code
                 if not cands and time.time() - t0 > self.otp_fallback_after_sec:
@@ -229,7 +244,7 @@ class ProtocolRegister:
                               < dt.timedelta(minutes=self.otp_backfill_window_min)]
                     if recent:
                         newest = max(recent, key=self._mail_time)
-                        code = self._code_from(card, newest)
+                        code = self._code_from(card, newest, proxy_url)
                         if code:
                             return code
             except Exception as e:
@@ -242,11 +257,11 @@ class ProtocolRegister:
             time.sleep(self.otp_poll)
         return None
 
-    def _exchange_code(self, code: str, verifier: str) -> dict | None:
+    def _exchange_code(self, code: str, verifier: str, proxy_url: str = "") -> dict | None:
         """code + verifier → access/refresh/id 三件套（可被测试 monkeypatch）。"""
         from curl_cffi import requests as cffi
 
-        session = cffi.Session(impersonate="chrome", proxy=self.proxy_url or None,
+        session = cffi.Session(impersonate="chrome", proxy=proxy_url or None,
                                verify=tls_verify_enabled(self.config), timeout=60)
         try:
             r = session.post(
@@ -279,13 +294,20 @@ class ProtocolRegister:
     # ── 主流程（同步） ────────────────────────────
     def _register_sync(self, email: str, password: str, client_id: str,
                        refresh_token: str) -> dict[str, Any]:
+        from services.proxy_service import proxy_service
+
         card = {"email": email, "password": password,
                 "client_id": client_id, "refresh_token": refresh_token}
+        # 每账号解析一次出口代理并贯穿全流程（authorize/取码/换 token 同一出口 IP，
+        # 防中途换 IP 触发风控）；kookeey 动态住宅每账号新 IP。
+        proxy_url = self._resolve_proxy()
         result: dict[str, Any] = {
             "email": email, "status": "failed", "error": "",
             "access_token": "", "refresh_token": "", "id_token": "",
             "openai_password": "", "name": "", "birthdate": "",
-            "proxy": self.proxy_url or "直连", "fallback_browser": False,
+            # 只存 host:port 展示格式，不把 kookeey 账密写进库（与浏览器路径一致）
+            "proxy": proxy_service.format_for_display(proxy_url) if proxy_url else "直连",
+            "fallback_browser": False,
             "failure_type": "unknown",
         }
         device_id = uuid.uuid4().hex
@@ -296,7 +318,7 @@ class ProtocolRegister:
         result["name"] = name
         result["birthdate"] = birthdate
 
-        session = self._make_session()
+        session = self._make_session(proxy_url)
         try:
             session.cookies.set("oai-did", device_id, domain=".auth.openai.com")
 
@@ -370,7 +392,7 @@ class ProtocolRegister:
                     return result
 
             # ── 3. 取本次触发的最新验证码 ──
-            code = self._fetch_newest_otp(card, otp_trigger)
+            code = self._fetch_newest_otp(card, otp_trigger, proxy_url)
             if not code:
                 result["error"] = "验证码等待超时"
                 result["fallback_browser"] = True  # 邮箱/邮件通道异常可降级
@@ -410,7 +432,7 @@ class ProtocolRegister:
                 return result
 
             # ── 6. 换三件套 ──
-            tokens = self._exchange_code(cb_code, verifier)
+            tokens = self._exchange_code(cb_code, verifier, proxy_url)
             if not tokens or not tokens.get("access_token"):
                 result["error"] = "code 换 token 失败"
                 result["fallback_browser"] = True
