@@ -25,7 +25,6 @@ RUN python -m camoufox fetch || echo "[warn] camoufox fetch 失败，运行期�
 COPY main.py ./
 COPY api ./api
 COPY services ./services
-COPY utils ./utils
 COPY scripts ./scripts
 COPY cf_solver ./cf_solver
 COPY web_dist ./web_dist
