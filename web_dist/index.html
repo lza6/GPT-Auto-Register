@@ -101,6 +101,9 @@
       </h2>
       <div class="hint">邮箱池是微软邮箱账号，用于接收注册验证码。格式：<code>邮箱----密码----client_id----refresh_token</code>（每行一个，可从 91kami 导出或手动粘贴）。</div>
       <div class="controls" style="margin-bottom:12px">
+        <select id="emPlatform" style="max-width:150px" onchange="emPage=0;loadEmails()" title="平台切换：同邮箱可在不同平台各注册一次">
+          <option value="">全部平台</option>
+        </select>
         <input type="text" id="emSearch" placeholder="🔍 搜索邮箱..." style="max-width:240px" oninput="onEmSearch()">
         <select id="emStatus" style="max-width:160px" onchange="emPage=0;loadEmails()">
           <option value="">全部状态</option>

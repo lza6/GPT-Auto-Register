@@ -29,8 +29,9 @@ async def pending_emails(limit: int = 100) -> dict:
 
 
 @router.get("/")
-async def list_emails(status: str = "", limit: int = 0, offset: int = 0, search: str = "") -> dict:
-    """邮箱池列表，支持状态筛选 / 邮箱搜索 / 分页。total 用 COUNT 查询避免全表装载。"""
+async def list_emails(status: str = "", limit: int = 0, offset: int = 0, search: str = "",
+                      platform: str = "") -> dict:
+    """邮箱池列表，支持状态/平台筛选 + 邮箱搜索 + 分页。total 用 COUNT 查询避免全表装载。"""
     # v3.1 审计：limit 收敛安全范围（0/负数→默认 100，上限 500），避免全表明文凭据被一次性拉取
     limit = min(limit, 500) if limit > 0 else 100
     offset = max(0, offset)
@@ -39,6 +40,9 @@ async def list_emails(status: str = "", limit: int = 0, offset: int = 0, search:
     if status:
         conds.append("status = ?")
         params.append(status)
+    if platform:
+        conds.append("platform = ?")
+        params.append(platform)
     if search:
         conds.append("email LIKE ?")
         params.append(f"%{search.strip()}%")
@@ -46,7 +50,15 @@ async def list_emails(status: str = "", limit: int = 0, offset: int = 0, search:
     sql = f"SELECT * FROM emails{where} ORDER BY id DESC LIMIT ? OFFSET ?"
     with db_session() as conn:
         rows = conn.execute(sql, params + [limit, offset]).fetchall()
-    total = count_emails(status=status, search=search)
+    # total：platform 过滤时单独 COUNT（count_emails 暂不支持 platform）
+    if platform:
+        with db_session() as conn:
+            cnt_conds = [c for c in conds]
+            cnt_where = (" WHERE " + " AND ".join(cnt_conds)) if cnt_conds else ""
+            row = conn.execute(f"SELECT COUNT(*) AS c FROM emails{cnt_where}", params).fetchone()
+        total = row["c"] if row else 0
+    else:
+        total = count_emails(status=status, search=search)
     return {"emails": [dict(r) for r in rows], "total": total}
 
 

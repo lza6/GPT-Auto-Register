@@ -238,25 +238,53 @@ async function importEmails() {
 function openManualAdd() {
   openModal('✍️ 手动添加邮箱', `
     <div class="hint">每行一个邮箱，格式：<code>邮箱----密码----client_id----refresh_token</code>。也可以只填邮箱（密码等留空）。</div>
+    <div class="form-group"><label>目标平台（同邮箱可在不同平台各注册一次）</label>
+      <select id="manualPlatform" style="width:100%">
+        <option value="chatgpt">chatgpt（ChatGPT/OpenAI）</option>
+      </select></div>
     <div class="form-group"><label>邮箱列表</label>
       <textarea id="manualEmails" style="min-height:220px" placeholder="xxx@outlook.com----密码----client_id----refresh_token"></textarea></div>
     <div class="modal-actions">
       <button class="btn btn-ghost" onclick="closeModal()">取消</button>
       <button class="btn btn-success" id="btnManualAddModal" onclick="submitManualAdd()">添加</button>
     </div>`);
+  // 动态填充平台选项（含已注册过的平台）
+  api('/emails/platforms').then(d => {
+    const sel = document.getElementById('manualPlatform');
+    if (!sel || !d.platforms) return;
+    sel.innerHTML = d.platforms.map(p =>
+      `<option value="${escapeHtml(p)}">${escapeHtml(p)}</option>`).join('');
+  }).catch(() => {});
 }
 async function submitManualAdd() {
   const text = document.getElementById('manualEmails').value;
   if (!text.trim()) { alert('内容为空'); return; }
+  const platform = (document.getElementById('manualPlatform') || {}).value || 'chatgpt';
   const btn = document.getElementById('btnManualAddModal');
   if (btn) btn.disabled = true;
   try {
-    const data = await api('/emails/manual-add', { method: 'POST', body: JSON.stringify({ text }) });
+    const data = await api('/emails/manual-add', { method: 'POST', body: JSON.stringify({ text, platform }) });
     closeModal();
     toast(`已添加 ${data.inserted} 个邮箱, 跳过 ${data.skipped} 个`);
-    refreshStatus(); loadEmails();
+    refreshStatus(); loadEmails(); loadPlatforms();
   } catch (e) { alert('添加失败: ' + e.message); }
   finally { if (btn) btn.disabled = false; }
+}
+
+// 平台切换下拉：从 /api/emails/platforms 拉所有平台
+async function loadPlatforms() {
+  try {
+    const d = await api('/emails/platforms');
+    const sel = document.getElementById('emPlatform');
+    if (!sel || !d.platforms) return;
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">全部平台</option>' + d.platforms.map(p => {
+      const st = (d.stats || {})[p] || {};
+      const label = `${p} (${st.used || 0}/${st.total || 0})`;
+      return `<option value="${escapeHtml(p)}">${escapeHtml(label)}</option>`;
+    }).join('');
+    sel.value = cur;
+  } catch (e) { /* 平台列表加载失败不阻断邮箱池 */ }
 }
 
 // ── 注册控制 ──
@@ -386,8 +414,10 @@ async function loadEmails(manual) {
   try {
     const search = document.getElementById('emSearch').value.trim();
     const status = document.getElementById('emStatus').value;
+    const platform = (document.getElementById('emPlatform') || {}).value || '';
     const params = new URLSearchParams({ limit: EM_PAGE_SIZE, offset: emPage * EM_PAGE_SIZE });
     if (status) params.set('status', status);
+    if (platform) params.set('platform', platform);
     if (search) params.set('search', search);
     const data = await api('/emails/?' + params.toString());
     const tbody = document.getElementById('emailsBody');
@@ -756,7 +786,7 @@ function switchTab(name, el) {
   if (el) el.classList.add('active');
   document.getElementById('tab-' + name).classList.add('active');
   if (name === 'accounts') loadAccounts();
-  else if (name === 'emails') loadEmails();
+  else if (name === 'emails') { loadPlatforms(); loadEmails(); }
   else if (name === 'proxies') loadProxies();
   else if (name === 'logs') loadLogs(true);
   else if (name === 'settings') { loadSettings(); loadTokenHealth(); }
