@@ -5,6 +5,7 @@ import json
 from typing import Any
 
 from services.db import add_log, insert_account, mark_email_status, get_accounts, update_task_progress
+from services.db import mark_platform_usage
 
 
 def _as_bool(value, default: bool = True) -> bool:
@@ -231,6 +232,11 @@ class RegisterEngine:
                         )
                         stats["completed"] += 1
                         mark_email_status(email, "used")
+                        # v3.3：标记平台使用（去重/审计——该邮箱已在 chatgpt 平台注册成功）
+                        try:
+                            mark_platform_usage(email, "chatgpt", "used", account_email=email)
+                        except Exception:
+                            pass
                         if result["access_token"]:
                             self._append_token(result["access_token"])
                     elif result["status"] == "cf_blocked":

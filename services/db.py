@@ -111,6 +111,28 @@ def init_db() -> None:
                 conn.execute(f"ALTER TABLE accounts ADD COLUMN {col} TEXT")
             except Exception:
                 pass
+        # 迁移（v3.3 多平台邮箱库）：emails/accounts 补 platform 字段，标记邮箱用于哪个平台注册。
+        # 默认 'chatgpt'（现有数据）。后续扩展 grok/claude 等平台自动化注册时按 platform 区分，
+        # 同一邮箱可在不同平台各注册一次（跨平台去重），同平台内 email 唯一防重复注册。
+        for tbl in ("emails", "accounts"):
+            try:
+                conn.execute(f"ALTER TABLE {tbl} ADD COLUMN platform TEXT DEFAULT 'chatgpt'")
+            except Exception:
+                pass
+        # 平台使用记录表：一个邮箱在多个平台的使用情况（去重/审计的核心）。
+        # (email, platform) 唯一 → 同邮箱同平台只记一次；换平台可再注册。
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS platform_usage (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                status TEXT DEFAULT 'pending',
+                account_email TEXT,
+                used_at REAL,
+                created_at REAL DEFAULT (strftime('%s','now')),
+                UNIQUE(email, platform)
+            )
+        """)
         # 索引：高频查询字段补索引，避免数据量大时全表扫描（L4 配套性能优化）
         # CREATE INDEX IF NOT EXISTS 幂等，旧库升级与新库首次初始化都安全
         for idx_sql in (
@@ -118,6 +140,9 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_emails_status ON emails(status)",
             "CREATE INDEX IF NOT EXISTS idx_logs_created_at ON logs(created_at)",
             "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)",
+            "CREATE INDEX IF NOT EXISTS idx_emails_platform ON emails(platform)",
+            "CREATE INDEX IF NOT EXISTS idx_platform_usage_email ON platform_usage(email)",
+            "CREATE INDEX IF NOT EXISTS idx_platform_usage_platform ON platform_usage(platform)",
         ):
             try:
                 conn.execute(idx_sql)
@@ -174,17 +199,73 @@ def purge_old_logs(retention_days: int = 30) -> int:
     return cur.rowcount
 
 
-def insert_email(email: str, password: str, client_id: str, refresh_token: str) -> bool:
-    """插入邮箱；唯一冲突（OR IGNORE 未实际插入）返回 False，调用方据此次数准确计数。"""
+def insert_email(email: str, password: str, client_id: str, refresh_token: str,
+                 platform: str = "chatgpt") -> bool:
+    """插入邮箱；唯一冲突（OR IGNORE 未实际插入）返回 False，调用方据此次数准确计数。
+
+    platform：标记该邮箱用于哪个平台注册（默认 chatgpt）；同时在 platform_usage 记一行。
+    """
     try:
         with db_session() as conn:
             cur = conn.execute(
-                "INSERT OR IGNORE INTO emails (email, password, client_id, refresh_token) VALUES (?, ?, ?, ?)",
-                (email, password, client_id, refresh_token),
+                "INSERT OR IGNORE INTO emails (email, password, client_id, refresh_token, platform) VALUES (?, ?, ?, ?, ?)",
+                (email, password, client_id, refresh_token, platform or "chatgpt"),
+            )
+            # 平台使用记录（去重核心）：同邮箱同平台只记一次
+            conn.execute(
+                "INSERT OR IGNORE INTO platform_usage (email, platform, status) VALUES (?, ?, 'pending')",
+                (email, platform or "chatgpt"),
             )
         return cur.rowcount > 0  # 唯一约束冲突时 OR IGNORE 插入 0 行 → False（不误报新增）
     except Exception:
         return False
+
+
+# ── 平台使用记录（多平台注册去重/审计）────────────────────────────
+def list_platforms() -> list[str]:
+    """返回所有出现过的平台（去重），供前端平台切换按钮。"""
+    with db_session() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT platform FROM platform_usage WHERE platform IS NOT NULL AND platform != '' ORDER BY platform"
+        ).fetchall()
+    plats = [r["platform"] for r in rows]
+    return plats or ["chatgpt"]
+
+
+def email_platform_map(email: str) -> list[dict]:
+    """查一个邮箱在各平台的使用情况（哪些平台用过/状态）。"""
+    with db_session() as conn:
+        rows = conn.execute(
+            "SELECT platform, status, account_email, used_at FROM platform_usage WHERE email = ? ORDER BY platform",
+            (email,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def mark_platform_usage(email: str, platform: str, status: str, account_email: str = "") -> None:
+    """更新某邮箱在某平台的使用状态（注册成功/失败/使用）。"""
+    with db_session() as conn:
+        conn.execute(
+            """INSERT INTO platform_usage (email, platform, status, account_email, used_at)
+               VALUES (?, ?, ?, ?, ?)
+               ON CONFLICT(email, platform) DO UPDATE SET
+                 status=excluded.status, account_email=excluded.account_email, used_at=excluded.used_at""",
+            (email, platform or "chatgpt", status, account_email,
+             time.time() if status != "pending" else None),
+        )
+
+
+def platform_stats() -> dict:
+    """各平台邮箱使用统计：{platform: {total, used, pending}}。"""
+    with db_session() as conn:
+        rows = conn.execute(
+            """SELECT platform,
+                      COUNT(*) AS total,
+                      SUM(CASE WHEN status='used' THEN 1 ELSE 0 END) AS used,
+                      SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending
+               FROM platform_usage GROUP BY platform ORDER BY platform"""
+        ).fetchall()
+    return {r["platform"]: {"total": r["total"], "used": r["used"] or 0, "pending": r["pending"] or 0} for r in rows}
 
 
 def get_pending_emails(limit: int = 0) -> list[dict]:

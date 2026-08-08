@@ -3,7 +3,15 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from services.db import get_pending_emails, count_emails, insert_email, db_session
+from services.db import (
+    count_emails,
+    db_session,
+    email_platform_map,
+    get_pending_emails,
+    insert_email,
+    list_platforms,
+    platform_stats,
+)
 
 router = APIRouter()
 
@@ -11,6 +19,7 @@ router = APIRouter()
 class ManualAddRequest(BaseModel):
     """手动批量添加邮箱。每行格式: 邮箱----密码----client_id----refresh_token"""
     text: str = ""
+    platform: str = "chatgpt"  # 目标平台（多平台注册去重）
 
 
 @router.get("/pending")
@@ -63,11 +72,24 @@ async def manual_add(req: ManualAddRequest) -> dict:
         if not email:
             skipped += 1
             continue
-        if insert_email(email, password, client_id, refresh_token):
+        if insert_email(email, password, client_id, refresh_token, platform=req.platform or "chatgpt"):
             inserted += 1
         else:
             skipped += 1
     return {"success": True, "inserted": inserted, "skipped": skipped, "total": inserted + skipped}
+
+
+# ── 多平台邮箱库（去重/审计）────────────────────────────
+@router.get("/platforms")
+async def get_platforms() -> dict:
+    """所有出现过的平台列表（前端平台切换按钮数据源）。"""
+    return {"platforms": list_platforms(), "stats": platform_stats()}
+
+
+@router.get("/platform-map/{email}")
+async def get_email_platform_map(email: str) -> dict:
+    """查一个邮箱在各平台的使用情况（哪些平台注册过/状态）。"""
+    return {"email": email, "platforms": email_platform_map(email)}
 
 
 @router.delete("/{email_id}")
