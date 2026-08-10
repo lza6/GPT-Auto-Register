@@ -52,3 +52,4 @@ opencode.json
 # coverage 产物
 .coverage
 htmlcov/
+tests_full_output.txt
