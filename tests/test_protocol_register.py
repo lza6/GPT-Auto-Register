@@ -1,11 +1,25 @@
-"""services/protocol_register — 纯协议注册引擎（mock session，不依赖真实网络）。"""
+"""services/protocol_register — 纯协议注册引擎（mock session，不依赖真实网络）。
+
+测试覆盖：
+- 状态机枚举（RegistrationState）
+- 状态机转移（RegistrationStateMachine）
+- 注册上下文（RegistrationContext）
+- 完整流程（create-account / log-in）
+- 失败分类
+- 每账号独立代理
+"""
 from __future__ import annotations
 
 import json
 
 import pytest
 
-from services.protocol_register import ProtocolRegister
+from services.protocol_register import (
+    ProtocolRegister,
+    RegistrationState,
+    RegistrationStateMachine,
+    RegistrationContext,
+)
 
 
 class FakeResp:
@@ -57,6 +71,134 @@ def _make_reg(monkeypatch, session):
 
 
 CARDS = {"email": "u@example.com", "password": "p", "client_id": "cid", "refresh_token": "rt"}
+
+
+# ── 状态机枚举测试 ──────────────────────────────────
+
+
+class TestRegistrationState:
+    def test_enum_values_are_strings(self):
+        """每个状态值应为人类可读字符串。"""
+        assert RegistrationState.AUTHORIZED.value == "authorized"
+        assert RegistrationState.COMPLETED.value == "completed"
+        assert RegistrationState.FAILED.value == "failed"
+
+    def test_all_states_defined(self):
+        """确保定义了所有预期状态（共 9 个）。"""
+        expected = {
+            "authorized", "user_register", "email_otp_send", "login_otp_trigger",
+            "email_otp_wait", "email_otp_validate", "create_account",
+            "exchange_token", "completed", "failed",
+        }
+        actual = set(s.value for s in RegistrationState)
+        assert actual == expected
+
+
+# ── 状态机转移测试 ──────────────────────────────────
+
+
+class TestRegistrationStateMachine:
+    def test_initial_state_is_authorized(self):
+        sm = RegistrationStateMachine()
+        assert sm.current == RegistrationState.AUTHORIZED
+
+    def test_valid_transition_succeeds(self):
+        sm = RegistrationStateMachine()
+        sm.transition(RegistrationState.USER_REGISTER, "开始注册")
+        assert sm.current == RegistrationState.USER_REGISTER
+        assert len(sm.history) == 1
+        assert sm.history[0]["from"] == "authorized"
+        assert sm.history[0]["to"] == "user_register"
+        assert sm.history[0]["detail"] == "开始注册"
+
+    def test_invalid_transition_raises(self):
+        sm = RegistrationStateMachine()
+        with pytest.raises(ValueError, match="非法状态转移"):
+            sm.transition(RegistrationState.COMPLETED)
+
+    def test_fail_transition(self):
+        sm = RegistrationStateMachine()
+        sm.fail("网络错误")
+        assert sm.current == RegistrationState.FAILED
+        assert len(sm.history) == 1
+
+    def test_fail_is_idempotent(self):
+        sm = RegistrationStateMachine()
+        sm.fail("第一次失败")
+        sm.fail("第二次失败")
+        assert sm.current == RegistrationState.FAILED
+        assert len(sm.history) == 1  # 只记录一次
+
+    def test_full_create_account_path(self):
+        """模拟 create-account 完整路径到 COMPLETED。"""
+        sm = RegistrationStateMachine()
+        path = [
+            RegistrationState.USER_REGISTER,
+            RegistrationState.EMAIL_OTP_SEND,
+            RegistrationState.EMAIL_OTP_WAIT,
+            RegistrationState.EMAIL_OTP_VALIDATE,
+            RegistrationState.CREATE_ACCOUNT,
+            RegistrationState.EXCHANGE_TOKEN,
+            RegistrationState.COMPLETED,
+        ]
+        for state in path:
+            sm.transition(state)
+        assert sm.current == RegistrationState.COMPLETED
+
+    def test_full_login_path(self):
+        """模拟 log-in 完整路径到 COMPLETED（无 about-you）。"""
+        sm = RegistrationStateMachine()
+        path = [
+            RegistrationState.LOGIN_OTP_TRIGGER,
+            RegistrationState.EMAIL_OTP_WAIT,
+            RegistrationState.EMAIL_OTP_VALIDATE,
+            RegistrationState.EXCHANGE_TOKEN,
+            RegistrationState.COMPLETED,
+        ]
+        for state in path:
+            sm.transition(state)
+        assert sm.current == RegistrationState.COMPLETED
+
+    def test_snapshot_contains_current_and_history(self):
+        sm = RegistrationStateMachine()
+        sm.transition(RegistrationState.FAILED, "测试错误")
+        snap = sm.snapshot()
+        assert snap["current"] == "failed"
+        assert len(snap["history"]) == 1
+
+    def test_failed_terminal_no_transitions(self):
+        sm = RegistrationStateMachine()
+        sm.fail("失败")
+        with pytest.raises(ValueError, match="非法状态转移"):
+            sm.transition(RegistrationState.COMPLETED)
+
+
+# ── 注册上下文测试 ──────────────────────────────────
+
+
+class TestRegistrationContext:
+    def test_default_values(self):
+        ctx = RegistrationContext()
+        assert ctx.email == ""
+        assert ctx.proxy_url == ""
+        assert ctx.fingerprint == ""
+        assert ctx.state_machine.current == RegistrationState.AUTHORIZED
+
+    def test_initialized_with_values(self):
+        sm = RegistrationStateMachine()
+        ctx = RegistrationContext(
+            email="test@example.com",
+            proxy_url="http://proxy:8080",
+            state_machine=sm,
+            result={"status": "failed"},
+        )
+        assert ctx.email == "test@example.com"
+        assert ctx.proxy_url == "http://proxy:8080"
+        assert ctx.state_machine is sm
+        assert ctx.result["status"] == "failed"
+
+
+# ── 既有流程测试（保持向后兼容）────────────────────
 
 
 class TestCreateAccountPath:

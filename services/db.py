@@ -7,6 +7,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from services.metrics import emails_total, emails_pending, accounts_success, accounts_failed
+
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DB_PATH = DATA_DIR / "register.db"
 
@@ -111,6 +113,11 @@ def init_db() -> None:
                 conn.execute(f"ALTER TABLE accounts ADD COLUMN {col} TEXT")
             except Exception:
                 pass
+        # 迁移（B3 失败重试下钻）：accounts 补 failure_type 列，标记失败分类
+        try:
+            conn.execute("ALTER TABLE accounts ADD COLUMN failure_type TEXT DEFAULT ''")
+        except Exception:
+            pass
         # 迁移（v3.3 多平台邮箱库）：emails/accounts 补 platform 字段，标记邮箱用于哪个平台注册。
         # 默认 'chatgpt'（现有数据）。后续扩展 grok/claude 等平台自动化注册时按 platform 区分，
         # 同一邮箱可在不同平台各注册一次（跨平台去重），同平台内 email 唯一防重复注册。
@@ -169,6 +176,17 @@ def add_log(level: str, message: str, data: Any = None) -> None:
                 "DELETE FROM logs WHERE id <= (SELECT COALESCE(MAX(id), 0) FROM logs) - ?",
                 (MAX_LOG_ROWS,),  # 删到只剩 MAX_LOG_ROWS 条
             )
+
+
+# v3.4 日志 flusher 接口（兼容测试/旧版调用，当前版本同步直写，无需后台 flusher）
+def stop_log_flusher() -> None:
+    """停止日志 flusher（当前版本同步直写，无后台线程，该函数为兼容旧调用而存在）。"""
+    pass
+
+
+def flush_logs() -> None:
+    """排空日志队列（当前版本同步直写，无需排空，该函数为兼容旧调用而存在）。"""
+    pass
 
 
 def get_logs(limit: int = 100, offset: int = 0) -> list[dict]:
@@ -289,25 +307,29 @@ def insert_account(email: str, password: str, client_id: str, refresh_token: str
                    access_token: str = "", name: str = "", birthdate: str = "",
                    proxy: str = "", status: str = "pending", error: str = "",
                    openai_refresh_token: str = "", id_token: str = "",
-                   openai_password: str = "") -> None:
+                   openai_password: str = "", failure_type: str = "") -> None:
     with db_session() as conn:
         conn.execute(
             """INSERT OR REPLACE INTO accounts
-               (email, password, client_id, refresh_token, access_token, openai_refresh_token, id_token, openai_password, name, birthdate, proxy, status, error, registered_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (email, password, client_id, refresh_token, access_token, openai_refresh_token, id_token, openai_password, name, birthdate, proxy, status, error, registered_at, failure_type)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (email, password, client_id, refresh_token, access_token, openai_refresh_token, id_token,
              openai_password, name, birthdate, proxy, status, error,
-             time.time() if status == 'success' else None),
+             time.time() if status == 'success' else None, failure_type),
         )
 
 
-def get_accounts(status: str = "", limit: int = 0, offset: int = 0, search: str = "") -> list[dict]:
+def get_accounts(status: str = "", limit: int = 0, offset: int = 0, search: str = "",
+                 failure_type: str = "") -> list[dict]:
     sql = "SELECT * FROM accounts"
     params: list = []
     conds: list[str] = []
     if status:
         conds.append("status = ?")
         params.append(status)
+    if failure_type:
+        conds.append("failure_type = ?")
+        params.append(failure_type)
     if search:
         conds.append("email LIKE ?")
         params.append(f"%{search.strip()}%")
@@ -322,13 +344,16 @@ def get_accounts(status: str = "", limit: int = 0, offset: int = 0, search: str 
     return [dict(r) for r in rows]
 
 
-def count_accounts(status: str = "", search: str = "") -> int:
+def count_accounts(status: str = "", search: str = "", failure_type: str = "") -> int:
     with db_session() as conn:
         conds: list[str] = []
         params: list = []
         if status:
             conds.append("status = ?")
             params.append(status)
+        if failure_type:
+            conds.append("failure_type = ?")
+            params.append(failure_type)
         if search:
             conds.append("email LIKE ?")
             params.append(f"%{search.strip()}%")
@@ -350,6 +375,38 @@ def count_emails(status: str = "", search: str = "") -> int:
         where = (" WHERE " + " AND ".join(conds)) if conds else ""
         row = conn.execute(f"SELECT COUNT(*) as c FROM emails{where}", params).fetchone()
     return row["c"] if row else 0
+
+
+def requeue_failed_emails(failure_type: str = "") -> int:
+    """把 failed/cf_blocked 账号对应的邮箱回置为 pending，供 /start 重新注册。
+
+    可选 failure_type 定向回置某类失败子集。
+    回置 emails.status 的同时清空 accounts.failure_type，确保诊断分类准确。
+    """
+    with db_session() as conn:
+        if failure_type:
+            rows = conn.execute(
+                "SELECT email FROM accounts WHERE status IN ('failed','cf_blocked') AND failure_type = ?",
+                (failure_type,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT email FROM accounts WHERE status IN ('failed','cf_blocked')"
+            ).fetchall()
+        n = 0
+        for r in rows:
+            cur = conn.execute(
+                "UPDATE emails SET status='pending', used_at=NULL WHERE email=? AND status!='pending'",
+                (r["email"],),
+            )
+            n += cur.rowcount
+            # 重置对应 accounts 的 failure_type（B3 修复）
+            if cur.rowcount > 0:
+                conn.execute(
+                    "UPDATE accounts SET failure_type = '' WHERE email = ? AND (failure_type IS NOT NULL AND failure_type != '')",
+                    (r["email"],),
+                )
+    return n
 
 
 def get_stats() -> dict:
@@ -393,7 +450,18 @@ def get_stats() -> dict:
 
     # v3.0 A4A6：失败分级诊断建议（前端统计卡片展示）
     stats["failure_diagnosis"] = _build_failure_diagnosis(stats["last_task_failure_types"])
+
+    # B15：刷新 Prometheus gauge 指标
+    _refresh_metrics_gauges(stats)
     return stats
+
+
+def _refresh_metrics_gauges(stats: dict) -> None:
+    """将 get_stats 结果同步到 Prometheus gauge。"""
+    emails_total.set(stats.get("emails_total", 0))
+    emails_pending.set(stats.get("emails_pending", 0))
+    accounts_success.set(stats.get("accounts_success", 0))
+    accounts_failed.set(stats.get("accounts_failed", 0))
 
 
 def _build_failure_diagnosis(failure_types: dict) -> str:
@@ -456,6 +524,15 @@ def get_latest_task() -> dict | None:
     return dict(row) if row else None
 
 
+def get_task_history(limit: int = 50) -> list[dict]:
+    """返回最近任务历史（按 id 倒序），供前端任务历史查看。"""
+    with db_session() as conn:
+        rows = conn.execute(
+            "SELECT * FROM tasks ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def reset_stale_tasks() -> int:
     """服务启动时把遗留的 running 任务标记为 interrupted（断点续跑信号）。
 
@@ -467,6 +544,70 @@ def reset_stale_tasks() -> int:
             (time.time(),),
         )
     return cur.rowcount
+
+
+# === VACUUM 策略 ===
+import time as _time
+import logging as _logging
+
+_log = _logging.getLogger("gpt-register.vacuum")
+
+VACUUM_DELETE_RATIO = 0.20
+VACUUM_FILE_SIZE_MB = 50
+
+_last_vacuum_time: float = 0.0
+
+
+def _get_db_path() -> Path:
+    return DB_PATH
+
+
+def _get_deleted_ratio() -> float:
+    conn = get_conn()
+    try:
+        total, deleted = 0, 0
+        for tbl in ("emails", "accounts", "logs", "platform_usage"):
+            row = conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()
+            total += row[0] if row else 0
+            try:
+                drow = conn.execute(f"SELECT COUNT(*) FROM {tbl} WHERE status='deleted'").fetchone()
+                deleted += drow[0] if drow else 0
+            except Exception:
+                pass
+        return deleted / max(total, 1)
+    finally:
+        conn.close()
+
+
+def vacuum_if_needed(force: bool = False) -> str:
+    global _last_vacuum_time
+    db_path = _get_db_path()
+    if not db_path.exists():
+        return "skipped:no_db"
+    size_mb = db_path.stat().st_size / 1024 / 1024
+    if not force:
+        if size_mb < VACUUM_FILE_SIZE_MB:
+            return f"skipped:file_size={size_mb:.1f}MB<{VACUUM_FILE_SIZE_MB}MB"
+        ratio = _get_deleted_ratio()
+        if ratio < VACUUM_DELETE_RATIO:
+            return f"skipped:delete_ratio={ratio:.2%}<{VACUUM_DELETE_RATIO:.0%}"
+    try:
+        conn = get_conn()
+        try:
+            conn.execute("VACUUM")
+            conn.commit()
+            _last_vacuum_time = _time.time()
+            _log.info("VACUUM 完成（force=%s, size=%.1fMB）", force, size_mb)
+            return "ok"
+        finally:
+            conn.close()
+    except Exception as e:
+        _log.error("VACUUM 失败: %s", e)
+        return f"error:{e}"
+
+
+def get_last_vacuum_time() -> float:
+    return _last_vacuum_time
 
 
 init_db()

@@ -185,6 +185,11 @@ echo.
 echo [RESTART] Service exited abnormally (code %EXIT_CODE%), restarting in 3s (attempt %RESTART_COUNT%)...
 echo   To stop completely, just close this window
 echo.
+if "%RESTART_COUNT%" GEQ "10" (
+    echo [FATAL] Service crashed %RESTART_COUNT% times consecutively. Stopping auto-restart.
+    echo [FATAL] Please check logs\server.log for details.
+    goto :failed
+)
 ping -n 4 127.0.0.1 >nul
 goto :service_loop
 

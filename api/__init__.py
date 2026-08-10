@@ -22,7 +22,7 @@ CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
 DEFAULT_AUTH_PLACEHOLDERS = {"", "请修改为你的管理密钥", "change-me"}
 
 # 无需鉴权的 API 白名单（健康检查等）
-PUBLIC_API_PATHS = {"/api/healthz"}
+PUBLIC_API_PATHS = {"/api/healthz", "/metrics", "/docs", "/openapi.json", "/redoc"}
 
 
 def load_config() -> dict:
@@ -122,7 +122,12 @@ class AuthKeyMiddleware:
 
 def create_app() -> FastAPI:
     config = load_config()
-    app = FastAPI(title="GPT 自动注册", version="3.3.0")
+    app_version = str(config.get("version", "3.4.0"))
+    app = FastAPI(title="GPT 自动注册", version=app_version)
+
+    # B15: Prometheus 指标端点（需在 AuthKeyMiddleware 之前注册，放行白名单）
+    from services.metrics import metrics_endpoint
+    app.add_route("/metrics", metrics_endpoint, ["GET"])
 
     # CORS：前端由本站同源静态服务提供，仅放行本地调试源，关闭凭据通配
     app.add_middleware(
@@ -149,30 +154,61 @@ def create_app() -> FastAPI:
         )
     app.add_middleware(AuthKeyMiddleware, auth_key=auth_key)
 
-    @app.get("/api/healthz")
+    @app.get("/api/healthz", summary="健康检查", description="返回系统各组件健康状态：DB、CF Solver、浏览器池、代理池、邮件API、鉴权状态和版本号。")
     async def healthz() -> dict:
         # DB 可达性
         db_ok = True
+        db_error = ""
         try:
             from services.db import get_conn
             conn = get_conn()
             conn.execute("SELECT 1")
             conn.close()
-        except Exception:
+        except Exception as e:
             db_ok = False
+            db_error = str(e)[:50]
         # CF Solver 状态（:8001 端口是否 Listen）
         cf_status = _check_cf_solver()
         # 浏览器池实例数（camoufox 注册用，未初始化时 0）
         browser_pool_size = _get_browser_pool_size()
+        # 代理池可用代理数
+        proxy_pool_available = 0
+        try:
+            from services.proxy_service import proxy_service
+            proxy_pool_available = proxy_service.count
+        except Exception:
+            pass
+        # 邮件API 可达性（探测 98faka 或 Outlook 端点，5s 超时）
+        email_api_reachable = "unknown"
+        try:
+            import httpx
+            import asyncio
+            email_api_base = str(config.get("email_api_base", "") or "").strip()
+            if email_api_base:
+                probe_url = email_api_base.rstrip("/") + "/"
+                r = httpx.get(probe_url, timeout=5)
+                email_api_reachable = "ok" if r.status_code < 500 else "error"
+            else:
+                # 回退探测 Outlook 端点
+                r = httpx.get("https://outlook.live.com", timeout=5)
+                email_api_reachable = "ok" if r.status_code < 500 else "error"
+        except Exception:
+            email_api_reachable = "unreachable"
+
+        # 用 config 中的版本号（而非 hardcoded）
+        version = str(config.get("version", "3.4.0"))
         all_ok = db_ok and cf_status in ("ok", "unknown")
         return {
             "status": "ok" if all_ok else "degraded",
             "db": "ok" if db_ok else "error",
+            "db_error": db_error,
             "cf_solver": cf_status,
             "browser_pool_size": browser_pool_size,
+            "proxy_pool_available": proxy_pool_available,
+            "email_api_reachable": email_api_reachable,
             "auth": "enabled" if auth_key else "disabled",
             "auth_enforced": auth_enforced,
-            "version": "3.3.0",
+            "version": version,
         }
 
     # 优雅停机：uvicorn shutdown 时关浏览器池 + CF solver
@@ -223,6 +259,14 @@ def create_app() -> FastAPI:
         except Exception as e:
             log.warning(f"shutdown: token 巡检停止异常: {e}")
 
+        # B9：停止代理池自动清理后台线程
+        try:
+            from services.proxy_service import proxy_service
+            proxy_service.stop_cleanup()
+            log.info("shutdown: 代理池自动清理已停止")
+        except Exception as e:
+            log.warning(f"shutdown: 代理池自动清理停止异常: {e}")
+
     # token 保鲜巡检：startup 事件（async 上下文）内启动后台任务（v3.0 G1）
     # 注意：不能在 create_app 同步执行，create_task 需 running event loop
     token_refresh_enabled = _resolve_token_refresh_enabled(config)
@@ -231,6 +275,13 @@ def create_app() -> FastAPI:
     async def startup_handler() -> None:
         import logging
         log = logging.getLogger("gpt-register")
+        # 启动代理池自动清理（B9）
+        try:
+            from services.proxy_service import proxy_service
+            proxy_service.start_cleanup()
+            log.info("代理池自动清理后台线程已启动（每 30min 检查一次）")
+        except Exception as e:
+            log.warning(f"代理池自动清理启动失败: {e}")
         if token_refresh_enabled:
             try:
                 from services.token_refresher import get_token_refresher
@@ -238,6 +289,24 @@ def create_app() -> FastAPI:
                 log.info("token 巡检任务已启动")
             except Exception as e:
                 log.warning(f"token 巡检启动失败: {e}")
+
+        # B16: 每日凌晨 4 点定时 VACUUM
+        async def _vacuum_loop() -> None:
+            import asyncio
+            import time as _time
+            _log = logging.getLogger("gpt-register.vacuum")
+            while True:
+                now = _time.localtime()
+                seconds_till_4am = ((4 - now.tm_hour + 24) % 24) * 3600 - now.tm_min * 60 - now.tm_sec
+                if seconds_till_4am <= 0:
+                    seconds_till_4am += 86400
+                await asyncio.sleep(seconds_till_4am)
+                from services.db import vacuum_if_needed
+                result = vacuum_if_needed()
+                _log.info("定时 VACUUM: %s", result)
+
+        import asyncio
+        asyncio.create_task(_vacuum_loop())
 
     app.include_router(register_router.router, prefix="/api/register", tags=["register"])
     app.include_router(stats_router.router, prefix="/api/stats", tags=["stats"])

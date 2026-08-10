@@ -16,10 +16,13 @@ def isolated_db(tmp_path, monkeypatch):
     """把 services.db 的数据库路径隔离到临时目录，避免污染真实 data/register.db。"""
     import services.db as db
 
+    # v3.4 日志异步化：切换 DB 前停掉后台 flusher，防旧线程把日志写进上一个/下一个隔离 DB
+    db.stop_log_flusher()
     monkeypatch.setattr(db, "DATA_DIR", tmp_path)
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "register.db")
     db.init_db()
-    return tmp_path
+    yield tmp_path
+    db.stop_log_flusher()
 
 
 @pytest.fixture(autouse=True)
@@ -63,7 +66,8 @@ def client(monkeypatch, tmp_path):
     import api as api_init
     import api.settings as api_settings
 
-    # 隔离数据库
+    # 隔离数据库（v3.4：切换前停后台日志 flusher，防跨隔离 DB 写串库）
+    db.stop_log_flusher()
     monkeypatch.setattr(db, "DATA_DIR", tmp_path)
     monkeypatch.setattr(db, "DB_PATH", tmp_path / "register.db")
     db.init_db()

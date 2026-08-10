@@ -6,6 +6,8 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from api.models import SettingsResponse
+
 from services.db import get_setting, set_setting
 
 router = APIRouter()
@@ -35,7 +37,6 @@ ALLOWED_SETTINGS_KEYS = {
     "email_api_base",
     "user_agent",
     "auth_enforced",
-    # v3.0 新增（T4 配套）：浏览器池 / token 巡检 / CF 重试
     "browser_pool_size",
     "token_refresh_enabled",
     "token_refresh_interval_sec",
@@ -85,7 +86,7 @@ def _mask_sensitive(config: dict) -> dict:
     return out
 
 
-@router.get("/")
+@router.get("/", summary="获取所有设置", description="返回当前所有配置项（敏感字段已掩码）。")
 async def get_all_settings() -> dict:
     config = {}
     if CONFIG_PATH.exists():
@@ -93,23 +94,35 @@ async def get_all_settings() -> dict:
     return _mask_sensitive(config)
 
 
-@router.post("/")
+@router.post("/", summary="更新设置项", response_model=SettingsResponse,
+            description="更新单个配置项，同时写入 DB 和 config.json。仅允许修改白名单内的键。")
 async def update_setting(req: SettingsUpdateRequest) -> dict:
     key = req.key.strip()
     if key not in ALLOWED_SETTINGS_KEYS:
         raise HTTPException(400, f"不允许修改的配置项: {key}")
-    set_setting(key, req.value)
+    # 按 config_schema 转为正确类型再存 DB（消除 DB 脏数据）
+    coerced = _coerce_value(key, req.value)
+    set_setting(key, str(coerced))
     # 同步更新 config.json（按 config_schema 转为正确类型，避免 int/bool 被存成字符串触发告警）
     config = {}
     if CONFIG_PATH.exists():
         config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    config[key] = _coerce_value(key, req.value)
+    config[key] = coerced
     CONFIG_PATH.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
     return {"success": True}
 
 
-@router.get("/config")
+@router.get("/config", summary="获取 config.json", description="返回原始 config.json 内容（敏感字段已掩码）。")
 async def get_config() -> dict:
     if CONFIG_PATH.exists():
         return _mask_sensitive(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
     return {}
+
+
+@router.post("/vacuum", summary="手动 VACUUM", description="手动触发数据库 VACUUM 回收空间。")
+async def trigger_vacuum() -> dict:
+    """手动触发数据库 VACUUM。"""
+    from services.db import vacuum_if_needed
+
+    result = vacuum_if_needed(force=True)
+    return {"status": result}

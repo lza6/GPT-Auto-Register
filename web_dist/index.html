@@ -22,12 +22,20 @@
 
   <!-- 统计卡片 -->
   <div class="grid">
-    <div class="stat-card blue"><div class="value" id="sEmailsTotal">0</div><div class="label">邮箱总数</div></div>
-    <div class="stat-card yellow"><div class="value" id="sEmailsPending">0</div><div class="label">待注册</div></div>
-    <div class="stat-card green"><div class="value" id="sAccountsSuccess">0</div><div class="label">注册成功</div></div>
-    <div class="stat-card red"><div class="value" id="sAccountsFailed">0</div><div class="label">注册失败</div></div>
-    <div class="stat-card orange"><div class="value" id="sAccountsSkipped">0</div><div class="label">已跳过</div></div>
-    <div class="stat-card blue"><div class="value" id="sAccountsTotal">0</div><div class="label">账号总数</div></div>
+    <div class="stat-card blue"><div class="value skeleton" style="width:60px;height:28px">&nbsp;</div><div class="label">邮箱总数</div></div>
+    <div class="stat-card yellow"><div class="value skeleton" style="width:60px;height:28px">&nbsp;</div><div class="label">待注册</div></div>
+    <div class="stat-card green"><div class="value skeleton" style="width:60px;height:28px">&nbsp;</div><div class="label">注册成功</div></div>
+    <div class="stat-card red"><div class="value skeleton" style="width:60px;height:28px">&nbsp;</div><div class="label">注册失败</div></div>
+    <div class="stat-card orange"><div class="value skeleton" style="width:60px;height:28px">&nbsp;</div><div class="label">已跳过</div></div>
+    <div class="stat-card blue"><div class="value skeleton" style="width:60px;height:28px">&nbsp;</div><div class="label">账号总数</div></div>
+  </div>
+
+  <!-- v3.4 T94：c2api 就绪率 + 转化漏斗 -->
+  <div class="grid" id="readinessGrid" style="display:none;margin-bottom:12px">
+    <div class="stat-card green"><div class="value" id="sFullyReady">0</div><div class="label">c2api 就绪率</div></div>
+  </div>
+  <div id="funnelBar" class="panel" style="display:none;padding:12px 20px;margin-bottom:12px">
+    <div style="display:flex;gap:4px;font-size:12px;font-weight:600" id="funnelSegments"></div>
   </div>
 
   <!-- 失败分级诊断建议（v3.0 A4A6，由 updateStats 渲染） -->
@@ -43,6 +51,7 @@
       <button class="btn btn-warning" id="btnPause" onclick="controlRegister('pause')" disabled>⏸️ 暂停</button>
       <button class="btn btn-primary" id="btnResume" onclick="controlRegister('resume')" disabled>▶️ 继续</button>
       <button class="btn btn-danger" id="btnStop" onclick="controlRegister('stop')" disabled>⏹️ 停止</button>
+      <button class="btn btn-ghost" id="btnRetryFailed" onclick="retryFailed()" title="把失败/CF账号对应的邮箱回置待注册，换代理后重试">🔄 重试失败</button>
       <button class="btn btn-primary" onclick="exportTokens()">📋 导出 Token</button>
       <button class="btn btn-primary" onclick="openExportAccounts()">📤 导出账号</button>
       <button class="btn btn-primary" onclick="replenishTokens()" title="为有 refresh_token 但缺 access_token 的账号刷新补齐">🔧 一键补齐Token</button>
@@ -88,6 +97,7 @@
         <tbody id="accountsBody"></tbody>
       </table>
       </div>
+      <div class="skeleton skeleton-table" id="accountsSkeleton" style="display:block"></div>
       <div id="accountsEmpty" class="empty" style="display:none">暂无注册记录</div>
     </div>
   </div>
@@ -120,6 +130,7 @@
         <tbody id="emailsBody"></tbody>
       </table>
       </div>
+      <div class="skeleton skeleton-table" id="emailsSkeleton" style="display:block"></div>
       <div id="emailsEmpty" class="empty" style="display:none">暂无邮箱数据</div>
     </div>
   </div>
@@ -153,9 +164,21 @@
   <!-- 日志 -->
   <div class="tab-content" id="tab-logs">
     <div class="panel">
-      <h2>运行日志 <button class="btn btn-ghost btn-sm" onclick="loadLogs(true)">刷新</button>
+      <h2>运行日志
+        <button class="btn btn-ghost btn-sm" onclick="loadLogs(true)">刷新</button>
         <button class="btn btn-danger btn-sm" onclick="clearLogs()" style="margin-left:auto">清空日志</button>
       </h2>
+      <div class="controls" style="margin-bottom:8px">
+        <select id="logLevelFilter" style="max-width:120px" onchange="loadLogs(true)">
+          <option value="all">全部级别</option>
+          <option value="error">error</option>
+          <option value="warning">warning</option>
+          <option value="info">info</option>
+        </select>
+        <input type="text" id="logSearchInput" placeholder="🔍 搜索关键词..." style="max-width:200px" oninput="loadLogs(true)">
+        <button class="btn btn-ghost btn-sm" id="btnLogScroll" onclick="toggleLogScroll()">⏸ 暂停滚动</button>
+        <button class="btn btn-ghost btn-sm" onclick="exportLogs()">⬇ 导出</button>
+      </div>
       <div class="log-box" id="logBox"></div>
     </div>
   </div>
@@ -179,6 +202,10 @@
       <div class="form-row">
         <div class="form-group"><label>注册并发数</label><input type="number" id="cfgConcurrency" value="1" min="1"></div>
         <div class="form-group"><label>验证码轮询间隔 (秒)</label><input type="number" id="cfgOtpPoll" value="5" min="1"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label>浏览器池大小 (0=不池化)</label><input type="number" id="cfgBrowserPoolSize" value="0" min="0" title="固定代理场景开启，kookeey 动态代理保持 0"></div>
+        <div class="form-group"><label>CF 重试次数 (0=不重试)</label><input type="number" id="cfgCfRetryMax" value="2" min="0"></div>
       </div>
       <div class="form-row">
         <div class="form-group"><label>邮件源 API Base</label><input type="url" id="cfgEmailApiBase" placeholder="https://app.98faka.top"></div>

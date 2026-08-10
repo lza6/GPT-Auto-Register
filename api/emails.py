@@ -3,6 +3,8 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from api.models import EmailListResponse, ClearResponse, ApiResponse
+
 from services.db import (
     count_emails,
     db_session,
@@ -104,7 +106,7 @@ async def get_email_platform_map(email: str) -> dict:
     return {"email": email, "platforms": email_platform_map(email)}
 
 
-@router.delete("/{email_id}")
+@router.delete("/{email_id}", summary="删除邮箱", description="按 ID 删除单个邮箱。")
 async def delete_email(email_id: int) -> dict:
     with db_session() as conn:
         cur = conn.execute("DELETE FROM emails WHERE id = ?", (email_id,))
@@ -113,7 +115,8 @@ async def delete_email(email_id: int) -> dict:
     return {"success": True}
 
 
-@router.post("/clear")
+@router.post("/clear", summary="清空邮箱池", response_model=ClearResponse,
+            description="清空所有邮箱记录（谨慎操作，不可撤销）。")
 async def clear_emails() -> dict:
     with db_session() as conn:
         cur = conn.execute("DELETE FROM emails")

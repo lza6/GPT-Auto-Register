@@ -1,0 +1,13 @@
+.git
+.gitignore
+README.md
+docs/
+tests/
+scripts/
+*.md
+__pycache__/
+*.pyc
+data/
+logs/
+config.json
+proxies.txt

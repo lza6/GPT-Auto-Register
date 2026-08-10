@@ -16,16 +16,19 @@ from __future__ import annotations
 import asyncio
 import base64
 import datetime as dt
+import enum
 import hashlib
-import json
 import random
 import re
 import secrets
 import string
 import time
 import uuid
-from urllib.parse import parse_qs, urlencode, urlparse
+from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlencode
+
+import json
 
 import requests
 
@@ -47,18 +50,249 @@ USER_AGENT = (
 
 # 各端点对应的 sentinel flow（抓包确认）
 FLOW_REGISTER = "username_password_create"
+
+# ── 错误分类常量 ──
+NETWORK_ERROR_MARKERS = (
+    "tls", "ssl", "sslerror", "eof occurred", "connection",
+    "connect error", "timeout", "timed out", "proxy",
+    "socks", "dns", "name resolution", "winerror 10060",
+    "curl: (35)", "curl: (28)", "curl: (6)", "curl: (7)",
+    "remote disconnected", "connection reset", "connection aborted",
+    "max retries exceeded", "sentinel", "cloudflare", "turnstile",
+    "broken pipe", "certificate verify failed", "econnrefused",
+    "econnreset", "etimedout",
+)
+ACCOUNT_ERROR_MARKERS = (
+    "account_deactivated", "account deactivated", "account has been deactivated",
+    "deleted or deactivated", "registration_disallowed",
+    "invalid_grant", "authenticationfailed", "invalid credentials",
+    "wrong_email_otp_code", "password_verify_failed",
+    "phone_recently_used", "unsupported_phone_number", "fraud_guard",
+    "token_invalidated", "max_check_attempts",
+)
+MAILBOX_ERROR_MARKERS = (
+    "outlook otp timeout", "email_otp_poll_timeout", "mailbox otp timeout",
+    "invalid_or_expired_otp", "invalid code", "mailbox_otp_timeout",
+    "otp timeout",
+)
+AUTH_STATE_ERROR_MARKERS = (
+    "invalid_auth_step", "invalid_state", "sign-in session is no longer valid",
+)
+RATE_LIMIT_MARKERS = (
+    "rate_limit", "too_many", "429", "too many", "ratelimit",
+)
+
+
+def error_text(value) -> str:
+    if isinstance(value, dict):
+        parts = []
+        for key in ("error", "error_code", "message", "body", "status"):
+            item = value.get(key)
+            if item:
+                parts.append(str(item))
+        for key in ("refresh", "oauth", "relogin", "token_probe"):
+            item = value.get(key)
+            if isinstance(item, dict):
+                parts.append(error_text(item))
+        if not parts:
+            try:
+                parts.append(json.dumps(value, ensure_ascii=False, default=str)[:1000])
+            except Exception:
+                pass
+        return " ".join(parts).lower()
+    return str(value or "").lower()
+
+
+def classify_error(value) -> str:
+    text = error_text(value)
+    if any(marker in text for marker in ACCOUNT_ERROR_MARKERS):
+        return "account"
+    if any(marker in text for marker in MAILBOX_ERROR_MARKERS):
+        return "mailbox"
+    if any(marker in text for marker in NETWORK_ERROR_MARKERS):
+        return "network"
+    if any(marker in text for marker in AUTH_STATE_ERROR_MARKERS):
+        return "auth_state"
+    if any(marker in text for marker in RATE_LIMIT_MARKERS):
+        return "rate_limit"
+    return "unknown"
+
+
+# ── 错误分类常量结束 ──
 FLOW_OTP = "email_otp_validate"
 FLOW_CREATE = "create_account"
 
 MAIL_API = "https://app.98faka.top"
-OTP_POLL_SEC = 4
+
+
+# ── 状态机枚举 ──────────────────────────────────────────
+
+
+class RegistrationState(enum.Enum):
+    """注册流程状态机阶段枚举。
+
+    两种账号形态共用同一状态集，但路径不同：
+
+    create-account（新号）:
+        AUTHORIZED → USER_REGISTER → EMAIL_OTP_SEND → EMAIL_OTP_WAIT →
+        EMAIL_OTP_VALIDATE → (CREATE_ACCOUNT) → EXCHANGE_TOKEN → COMPLETED
+
+    log-in（半成品/已存在）:
+        AUTHORIZED → LOGIN_OTP_TRIGGER → EMAIL_OTP_WAIT →
+        EMAIL_OTP_VALIDATE → (CREATE_ACCOUNT) → EXCHANGE_TOKEN → COMPLETED
+
+    任何阶段均可转移至 FAILED。
+    """
+    AUTHORIZED = "authorized"
+    USER_REGISTER = "user_register"
+    EMAIL_OTP_SEND = "email_otp_send"
+    LOGIN_OTP_TRIGGER = "login_otp_trigger"
+    EMAIL_OTP_WAIT = "email_otp_wait"
+    EMAIL_OTP_VALIDATE = "email_otp_validate"
+    CREATE_ACCOUNT = "create_account"
+    EXCHANGE_TOKEN = "exchange_token"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+# 合法状态转移表（FAILED 可从任何状态到达）
+_TRANSITIONS: dict[RegistrationState, set[RegistrationState]] = {
+    RegistrationState.AUTHORIZED: {
+        RegistrationState.USER_REGISTER,
+        RegistrationState.LOGIN_OTP_TRIGGER,
+        RegistrationState.FAILED,
+    },
+    RegistrationState.USER_REGISTER: {
+        RegistrationState.EMAIL_OTP_SEND,
+        RegistrationState.FAILED,
+    },
+    RegistrationState.EMAIL_OTP_SEND: {
+        RegistrationState.EMAIL_OTP_WAIT,
+        RegistrationState.FAILED,
+    },
+    RegistrationState.LOGIN_OTP_TRIGGER: {
+        RegistrationState.EMAIL_OTP_WAIT,
+        RegistrationState.FAILED,
+    },
+    RegistrationState.EMAIL_OTP_WAIT: {
+        RegistrationState.EMAIL_OTP_VALIDATE,
+        RegistrationState.FAILED,
+    },
+    RegistrationState.EMAIL_OTP_VALIDATE: {
+        RegistrationState.CREATE_ACCOUNT,
+        RegistrationState.EXCHANGE_TOKEN,
+        RegistrationState.FAILED,
+    },
+    RegistrationState.CREATE_ACCOUNT: {
+        RegistrationState.EXCHANGE_TOKEN,
+        RegistrationState.FAILED,
+    },
+    RegistrationState.EXCHANGE_TOKEN: {
+        RegistrationState.COMPLETED,
+        RegistrationState.FAILED,
+    },
+    RegistrationState.COMPLETED: set(),
+    RegistrationState.FAILED: set(),
+}
+
+
+class RegistrationStateMachine:
+    """注册状态机 — 追踪阶段转移、校验合法性、记录历史。
+
+    用法::
+
+        sm = RegistrationStateMachine()
+        sm.transition(RegistrationState.USER_REGISTER, "开始设置密码")
+        # ... 执行业务逻辑 ...
+        sm.transition(RegistrationState.FAILED, "密码设置失败")
+        print(sm.snapshot())
+    """
+
+    def __init__(self) -> None:
+        self.current = RegistrationState.AUTHORIZED
+        self.history: list[dict[str, Any]] = []
+
+    def transition(self, state: RegistrationState, detail: str = "") -> None:
+        """转移到目标状态，校验合法性并记录历史。
+
+        Raises:
+            ValueError: 如果转移非法（不在 _TRANSITIONS 表中）。
+        """
+        allowed = _TRANSITIONS.get(self.current, set())
+        if state not in allowed:
+            raise ValueError(
+                f"非法状态转移: {self.current.value} -> {state.value} "
+                f"(允许: {[s.value for s in allowed]})"
+            )
+        self.history.append({
+            "from": self.current.value,
+            "to": state.value,
+            "detail": detail,
+            "at": time.time(),
+        })
+        self.current = state
+
+    def fail(self, detail: str = "") -> None:
+        """转移到 FAILED 终态（幂等）。"""
+        if self.current == RegistrationState.FAILED:
+            return
+        self.history.append({
+            "from": self.current.value,
+            "to": RegistrationState.FAILED.value,
+            "detail": detail,
+            "at": time.time(),
+        })
+        self.current = RegistrationState.FAILED
+
+    def snapshot(self) -> dict[str, Any]:
+        """返回可审计/可调试的状态机快照。"""
+        return {
+            "current": self.current.value,
+            "history": list(self.history),
+        }
+
+
+# ── 注册上下文 ──────────────────────────────────────────
+
+
+@dataclass
+class RegistrationContext:
+    """单次注册的上下文 — 所有可变状态集中管理。
+
+    每个字段在一次注册流程中确定后不再变更（不可变语义），
+    状态机各阶段通过此对象传递数据，而非通过 result dict 传递。
+    """
+    email: str = ""
+    password: str = ""
+    client_id: str = ""
+    refresh_token: str = ""
+    card: dict = field(default_factory=dict)
+    proxy_url: str = ""
+    fingerprint: str = ""
+    fp_ua: str = ""
+    device_id: str = ""
+    verifier: str = ""          # PKCE code_verifier（用于换 token）
+    challenge: str = ""         # PKCE code_challenge（用于 authorize）
+    session: Any = None          # curl_cffi Session
+    name: str = ""
+    birthdate: str = ""
+    openai_password: str = ""
+    otp_trigger: dt.datetime = field(default_factory=dt.datetime.now)
+    otp_code: str = ""           # 验证码（从邮件取到后暂存）
+    continue_url: str = ""       # OAuth 后续跳转 URL
+    flow_kind: str = ""          # "create-account" 或 "log-in"
+    result: dict = field(default_factory=dict)  # 累积结果字典
+    state_machine: RegistrationStateMachine = field(default_factory=RegistrationStateMachine)
+
+
+# ── 工具函数 ──────────────────────────────────────────
 
 
 def gen_password(length: int = 16) -> str:
     return "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(length))
 
 
-def _as_int(value, default: int) -> int:
+def _as_int(value: Any, default: int) -> int:
     """防御式整数解析：settings API 存字符串，非法/空回退默认。"""
     if value is None or value == "":
         return default
@@ -106,6 +340,9 @@ def _extract_code(continue_url: str) -> str:
     return m.group(1) if m else ""
 
 
+# ── 主注册类 ──────────────────────────────────────────
+
+
 class ProtocolRegister:
     """curl_cffi + sentinel 纯协议注册。"""
 
@@ -122,6 +359,8 @@ class ProtocolRegister:
         self.mail_api = (config.get("email_api_base") or MAIL_API).rstrip("/")
         # 一账号一指纹：不在实例存可变指纹（单例并发注册会竞态），改为每次注册按需生成
         # （_register_sync 开头 _fresh_fingerprint 选一次，线程局部贯穿全流程，不同账号不同指纹）。
+        # v3.4 T80：注册专用线程池（由 register_engine 注入；None 时 run_in_executor 走默认池，向后兼容）。
+        self._executor = None
 
     def _fresh_fingerprint(self) -> tuple[str, str]:
         """为一次注册生成 (TLS指纹, 配套UA)。每账号调用一次 → 一账号一指纹。
@@ -149,14 +388,18 @@ class ProtocolRegister:
         return ""
 
     # ── 对外异步入口 ──────────────────────────────
+
     async def register_one(self, email: str, password: str, client_id: str,
                            refresh_token: str) -> dict[str, Any]:
         loop = asyncio.get_event_loop()
+        # v3.4 T80：优先用 register_engine 注入的注册专用线程池（有界、大小=并发数），
+        # 未注入（独立脚本/测试直调）时回退默认池，向后兼容。
         return await loop.run_in_executor(
-            None, self._register_sync, email, password, client_id, refresh_token
+            self._executor, self._register_sync, email, password, client_id, refresh_token
         )
 
     # ── 工具 ─────────────────────────────────────
+
     def _make_session(self, proxy_url: str = "", fingerprint: str = "chrome") -> Any:
         from curl_cffi import requests as cffi
 
@@ -166,7 +409,7 @@ class ProtocolRegister:
             session.proxies = {"http": proxy_url, "https": proxy_url}
         return session
 
-    def _sentinel_headers(self, session, device_id: str, flow: str, ua: str = "") -> dict:
+    def _sentinel_headers(self, session: Any, device_id: str, flow: str, ua: str = "") -> dict:
         sentinel, oai_sc = build_sentinel_token(session, device_id, flow, user_agent=ua or self.ua)
         if oai_sc:
             session.cookies.set("oai-sc", oai_sc, domain=".openai.com")
@@ -307,7 +550,158 @@ class ProtocolRegister:
         finally:
             session.close()
 
-    # ── 主流程（同步） ────────────────────────────
+    # ── 状态机阶段方法 ────────────────────────────
+
+    def _stage_authorize(self, ctx: RegistrationContext) -> RegistrationState:
+        """阶段 1：authorize，建立会话并识别账号形态。"""
+        ctx.session = self._make_session(ctx.proxy_url, ctx.fingerprint)
+        ctx.session.cookies.set("oai-did", ctx.device_id, domain=".auth.openai.com")
+
+        r = ctx.session.get(
+            _build_authorize_url(ctx.email, ctx.challenge),
+            headers={
+                "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "user-agent": ctx.fp_ua,
+                "upgrade-insecure-requests": "1",
+            },
+            allow_redirects=True,
+        )
+        final = str(r.url)
+        if r.status_code not in (200, 302):
+            ctx.result["error"] = f"authorize HTTP {r.status_code}"
+            ctx.result["fallback_browser"] = True
+            ctx.result["failure_type"] = "server_5xx" if r.status_code >= 500 else "network"
+            return RegistrationState.FAILED
+
+        if "create-account" in final:
+            ctx.flow_kind = "create-account"
+            return RegistrationState.USER_REGISTER
+        elif "log-in" in final:
+            ctx.flow_kind = "log-in"
+            return RegistrationState.LOGIN_OTP_TRIGGER
+        else:
+            ctx.result["error"] = f"authorize 未识别形态: {final.split('?')[0][-60:]}"
+            ctx.result["fallback_browser"] = True
+            ctx.result["failure_type"] = "unknown"
+            return RegistrationState.FAILED
+
+    def _stage_user_register(self, ctx: RegistrationContext) -> RegistrationState:
+        """阶段 2a：create-account — 设密码。"""
+        ctx.openai_password = gen_password()
+        h = self._base_headers(f"{AUTH_BASE}/create-account/password", ctx.device_id, ctx.fp_ua)
+        h.update(self._sentinel_headers(ctx.session, ctx.device_id, FLOW_REGISTER, ctx.fp_ua))
+        r2 = ctx.session.post(f"{AUTH_BASE}/api/accounts/user/register",
+                              json={"password": ctx.openai_password, "username": ctx.email},
+                              headers=h)
+        j2 = r2.json() if r2.text else {}
+        if r2.status_code != 200 or not (j2.get("continue_url") or ""):
+            ctx.result["error"], ctx.result["fallback_browser"], ctx.result["failure_type"] = \
+                self._classify_failure(r2, j2, "user/register")
+            return RegistrationState.FAILED
+        return RegistrationState.EMAIL_OTP_SEND
+
+    def _stage_email_otp_send(self, ctx: RegistrationContext) -> RegistrationState:
+        """阶段 2b：触发 OTP 发送（create-account 路径）。"""
+        ctx.otp_trigger = dt.datetime.now()
+        r_send = ctx.session.get(f"{AUTH_BASE}/api/accounts/email-otp/send",
+                                 allow_redirects=False,
+                                 headers=self._base_headers(
+                                     f"{AUTH_BASE}/create-account/password",
+                                     ctx.device_id, ctx.fp_ua,
+                                 ))
+        if r_send.status_code != 200:
+            ctx.result["error"] = f"email-otp/send HTTP {r_send.status_code}"
+            ctx.result["fallback_browser"] = True
+            ctx.result["failure_type"] = "server_5xx" if r_send.status_code >= 500 else "network"
+            return RegistrationState.FAILED
+        return RegistrationState.EMAIL_OTP_WAIT
+
+    def _stage_login_otp_trigger(self, ctx: RegistrationContext) -> RegistrationState:
+        """阶段 2c：log-in — passwordless 触发 OTP。"""
+        ctx.otp_trigger = dt.datetime.now()
+        try:
+            h = self._base_headers(f"{AUTH_BASE}/log-in/password", ctx.device_id, ctx.fp_ua)
+            r2 = ctx.session.post(f"{AUTH_BASE}/api/accounts/passwordless/send-otp",
+                                  json={"username": ctx.email}, headers=h)
+            if r2.status_code != 200:
+                ctx.result["error"] = f"passwordless/send-otp HTTP {r2.status_code}"
+                ctx.result["fallback_browser"] = True
+                ctx.result["failure_type"] = "server_5xx" if r2.status_code >= 500 else "network"
+                return RegistrationState.FAILED
+        except Exception as e:
+            ctx.result["error"] = f"passwordless/send-otp 异常: {e}"
+            ctx.result["fallback_browser"] = True
+            ctx.result["failure_type"] = "network"
+            return RegistrationState.FAILED
+        return RegistrationState.EMAIL_OTP_WAIT
+
+    def _stage_email_otp_wait(self, ctx: RegistrationContext) -> RegistrationState:
+        """阶段 3：取本次触发的最新验证码。"""
+        code = self._fetch_newest_otp(ctx.card, ctx.otp_trigger, ctx.proxy_url)
+        if not code:
+            ctx.result["error"] = "验证码等待超时"
+            ctx.result["fallback_browser"] = True
+            ctx.result["failure_type"] = "otp_timeout"
+            return RegistrationState.FAILED
+        ctx.otp_code = code
+        return RegistrationState.EMAIL_OTP_VALIDATE
+
+    def _stage_email_otp_validate(self, ctx: RegistrationContext) -> RegistrationState:
+        """阶段 4：email-otp/validate。"""
+        h = self._base_headers(f"{AUTH_BASE}/email-verification", ctx.device_id, ctx.fp_ua)
+        h.update(self._sentinel_headers(ctx.session, ctx.device_id, FLOW_OTP, ctx.fp_ua))
+        r3 = ctx.session.post(f"{AUTH_BASE}/api/accounts/email-otp/validate",
+                              json={"code": ctx.otp_code}, headers=h)
+        j3 = r3.json() if r3.text else {}
+        ctx.continue_url = j3.get("continue_url") or ""
+        if r3.status_code != 200 or not ctx.continue_url:
+            ctx.result["error"], ctx.result["fallback_browser"], ctx.result["failure_type"] = \
+                self._classify_failure(r3, j3, "email-otp/validate")
+            return RegistrationState.FAILED
+
+        if "about-you" in ctx.continue_url:
+            return RegistrationState.CREATE_ACCOUNT
+        return RegistrationState.EXCHANGE_TOKEN
+
+    def _stage_create_account(self, ctx: RegistrationContext) -> RegistrationState:
+        """阶段 5：about-you → create_account。"""
+        h = self._base_headers(f"{AUTH_BASE}/about-you", ctx.device_id, ctx.fp_ua)
+        h.update(self._sentinel_headers(ctx.session, ctx.device_id, FLOW_CREATE, ctx.fp_ua))
+        r4 = ctx.session.post(f"{AUTH_BASE}/api/accounts/create_account",
+                              json={"name": ctx.name, "birthdate": ctx.birthdate}, headers=h)
+        j4 = r4.json() if r4.text else {}
+        ctx.continue_url = j4.get("continue_url") or ""
+        if r4.status_code != 200 or not _extract_code(ctx.continue_url):
+            ctx.result["error"], ctx.result["fallback_browser"], ctx.result["failure_type"] = \
+                self._classify_failure(r4, j4, "create_account")
+            return RegistrationState.FAILED
+        return RegistrationState.EXCHANGE_TOKEN
+
+    def _stage_exchange_token(self, ctx: RegistrationContext) -> RegistrationState:
+        """阶段 6：用 OAuth 授权码换三件套。"""
+        cb_code = _extract_code(ctx.continue_url)
+        if not cb_code:
+            ctx.result["error"] = "未拿到 OAuth 授权码"
+            ctx.result["fallback_browser"] = True
+            ctx.result["failure_type"] = "network"
+            return RegistrationState.FAILED
+
+        tokens = self._exchange_code(
+            cb_code, ctx.verifier, ctx.proxy_url, ctx.fingerprint, ctx.fp_ua,
+        )
+        if not tokens or not tokens.get("access_token"):
+            ctx.result["error"] = "code 换 token 失败"
+            ctx.result["fallback_browser"] = True
+            ctx.result["failure_type"] = "network"
+            return RegistrationState.FAILED
+
+        ctx.result.update(tokens)
+        ctx.result["openai_password"] = ctx.openai_password
+        ctx.result["status"] = "success"
+        return RegistrationState.COMPLETED
+
+    # ── 主流程（同步，状态机驱动） ──────────────────
+
     def _register_sync(self, email: str, password: str, client_id: str,
                        refresh_token: str) -> dict[str, Any]:
         from services.proxy_service import proxy_service
@@ -338,132 +732,50 @@ class ProtocolRegister:
         result["name"] = name
         result["birthdate"] = birthdate
 
-        session = self._make_session(proxy_url, fingerprint)
+        # 初始化上下文
+        ctx = RegistrationContext(
+            email=email,
+            password=password,
+            client_id=client_id,
+            refresh_token=refresh_token,
+            card=card,
+            proxy_url=proxy_url,
+            fingerprint=fingerprint,
+            fp_ua=fp_ua,
+            device_id=device_id,
+            verifier=verifier,
+            challenge=challenge,
+            name=name,
+            birthdate=birthdate,
+            result=result,
+        )
+
+        # 状态机阶段映射
+        stage_map: dict[RegistrationState, Any] = {
+            RegistrationState.AUTHORIZED: self._stage_authorize,
+            RegistrationState.USER_REGISTER: self._stage_user_register,
+            RegistrationState.EMAIL_OTP_SEND: self._stage_email_otp_send,
+            RegistrationState.LOGIN_OTP_TRIGGER: self._stage_login_otp_trigger,
+            RegistrationState.EMAIL_OTP_WAIT: self._stage_email_otp_wait,
+            RegistrationState.EMAIL_OTP_VALIDATE: self._stage_email_otp_validate,
+            RegistrationState.CREATE_ACCOUNT: self._stage_create_account,
+            RegistrationState.EXCHANGE_TOKEN: self._stage_exchange_token,
+        }
+        sm = ctx.state_machine
+
         try:
-            session.cookies.set("oai-did", device_id, domain=".auth.openai.com")
-
-            # ── 1. authorize，建立会话并识别账号形态 ──
-            r = session.get(
-                _build_authorize_url(email, challenge),
-                headers={
-                    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "user-agent": fp_ua,
-                    "upgrade-insecure-requests": "1",
-                },
-                allow_redirects=True,
-            )
-            final = str(r.url)
-            if r.status_code not in (200, 302):
-                result["error"] = f"authorize HTTP {r.status_code}"
-                result["fallback_browser"] = True  # 网络/服务问题 → 可降级
-                result["failure_type"] = "server_5xx" if r.status_code >= 500 else "network"
-                return result
-
-            if "create-account" in final:
-                flow_kind = "create-account"
-            elif "log-in" in final:
-                flow_kind = "log-in"
-            else:
-                result["error"] = f"authorize 未识别形态: {final.split('?')[0][-60:]}"
-                result["fallback_browser"] = True
-                result["failure_type"] = "unknown"
-                return result
-
-            otp_trigger = dt.datetime.now()
-            openai_password = ""
-
-            # ── 2a. create-account：设密码 ──
-            if flow_kind == "create-account":
-                openai_password = gen_password()
-                h = self._base_headers(f"{AUTH_BASE}/create-account/password", device_id, fp_ua)
-                h.update(self._sentinel_headers(session, device_id, FLOW_REGISTER, fp_ua))
-                r2 = session.post(f"{AUTH_BASE}/api/accounts/user/register",
-                                  json={"password": openai_password, "username": email},
-                                  headers=h)
-                j2 = r2.json() if r2.text else {}
-                if r2.status_code != 200 or not (j2.get("continue_url") or ""):
-                    result["error"], result["fallback_browser"], result["failure_type"] = \
-                        self._classify_failure(r2, j2, "user/register")
-                    return result
-                r_send = session.get(f"{AUTH_BASE}/api/accounts/email-otp/send",
-                                     allow_redirects=False,
-                                     headers=self._base_headers(f"{AUTH_BASE}/create-account/password", device_id, fp_ua))
-                if r_send.status_code != 200:
-                    result["error"] = f"email-otp/send HTTP {r_send.status_code}"
-                    result["fallback_browser"] = True
-                    result["failure_type"] = "server_5xx" if r_send.status_code >= 500 else "network"
-                    return result
-
-            # ── 2b. log-in：passwordless 触发 OTP（半成品/已存在账号） ──
-            else:
-                try:
-                    h = self._base_headers(f"{AUTH_BASE}/log-in/password", device_id, fp_ua)
-                    r2 = session.post(f"{AUTH_BASE}/api/accounts/passwordless/send-otp",
-                                      json={"username": email}, headers=h)
-                    if r2.status_code != 200:
-                        result["error"] = f"passwordless/send-otp HTTP {r2.status_code}"
-                        result["fallback_browser"] = True
-                        result["failure_type"] = "server_5xx" if r2.status_code >= 500 else "network"
-                        return result
-                except Exception as e:
-                    result["error"] = f"passwordless/send-otp 异常: {e}"
-                    result["fallback_browser"] = True
-                    result["failure_type"] = "network"
-                    return result
-
-            # ── 3. 取本次触发的最新验证码 ──
-            code = self._fetch_newest_otp(card, otp_trigger, proxy_url)
-            if not code:
-                result["error"] = "验证码等待超时"
-                result["fallback_browser"] = True  # 邮箱/邮件通道异常可降级
-                result["failure_type"] = "otp_timeout"
-                return result
-
-            # ── 4. email-otp/validate ──
-            h = self._base_headers(f"{AUTH_BASE}/email-verification", device_id, fp_ua)
-            h.update(self._sentinel_headers(session, device_id, FLOW_OTP, fp_ua))
-            r3 = session.post(f"{AUTH_BASE}/api/accounts/email-otp/validate",
-                              json={"code": code}, headers=h)
-            j3 = r3.json() if r3.text else {}
-            continue_url = j3.get("continue_url") or ""
-            if r3.status_code != 200 or not continue_url:
-                result["error"], result["fallback_browser"], result["failure_type"] = \
-                    self._classify_failure(r3, j3, "email-otp/validate")
-                return result
-
-            # ── 5. about-you → create_account ──
-            if "about-you" in continue_url:
-                h = self._base_headers(f"{AUTH_BASE}/about-you", device_id, fp_ua)
-                h.update(self._sentinel_headers(session, device_id, FLOW_CREATE, fp_ua))
-                r4 = session.post(f"{AUTH_BASE}/api/accounts/create_account",
-                                  json={"name": name, "birthdate": birthdate}, headers=h)
-                j4 = r4.json() if r4.text else {}
-                continue_url = j4.get("continue_url") or ""
-                if r4.status_code != 200 or not _extract_code(continue_url):
-                    result["error"], result["fallback_browser"], result["failure_type"] = \
-                        self._classify_failure(r4, j4, "create_account")
-                    return result
-
-            cb_code = _extract_code(continue_url)
-            if not cb_code:
-                result["error"] = "未拿到 OAuth 授权码"
-                result["fallback_browser"] = True
-                result["failure_type"] = "network"
-                return result
-
-            # ── 6. 换三件套 ──
-            tokens = self._exchange_code(cb_code, verifier, proxy_url, fingerprint, fp_ua)
-            if not tokens or not tokens.get("access_token"):
-                result["error"] = "code 换 token 失败"
-                result["fallback_browser"] = True
-                result["failure_type"] = "network"
-                return result
-
-            result.update(tokens)
-            result["openai_password"] = openai_password
-            result["status"] = "success"
-            return result
-
+            # 状态机主循环：持续执行当前阶段直到终态
+            while sm.current not in (RegistrationState.COMPLETED, RegistrationState.FAILED):
+                stage_fn = stage_map.get(sm.current)
+                if stage_fn is None:
+                    sm.fail(f"未知阶段: {sm.current.value}")
+                    break
+                next_state = stage_fn(ctx)
+                if next_state == RegistrationState.FAILED:
+                    sm.fail()
+                    break
+                sm.transition(next_state, "阶段完成")
+            return ctx.result
         except Exception as e:
             result["error"] = f"协议注册异常: {e}"
             result["fallback_browser"] = True
@@ -471,27 +783,44 @@ class ProtocolRegister:
             return result
         finally:
             try:
-                session.close()
+                if ctx.session:
+                    ctx.session.close()
             except Exception:
                 pass
 
     @staticmethod
-    def _classify_failure(resp, data: dict, step: str) -> tuple[str, bool, str]:
+    def _classify_failure(resp: Any, data: dict, step: str) -> tuple[str, bool, str]:
         """把协议失败分类，返回 (错误信息, 是否可降级浏览器, 失败类型)。
 
-        风控 / 限流 / OTP 类错误浏览器也过不了，不降级（避免无谓重试触发限流）；
+        风控 / 限流 类错误浏览器也过不了，不降级（避免无谓重试触发限流）；
+        OTP 超时类标记 otp_timeout；
+        Cloudflare/turnstile 网络类标记 network，可降级浏览器兜底；
         服务器临时错误（>=500）或网络异常 → 可降级浏览器兜底。
         failure_type 取值: risk_control / otp_timeout / network / server_5xx / unknown
         """
         text = str(data)[:250]
-        low = (text + (getattr(resp, "text", None) or "")).lower()
+        resp_text = getattr(resp, "text", None) or ""
+        low = (text + resp_text).lower()
         msg = f"{step} 失败 HTTP {getattr(resp, 'status_code', '?')}: {text or ''}"
+
+        # 1. OTP 超时类：invalid_or_expired_otp / invalid code / mailbox_otp_timeout → otp_timeout，不降级
+        if any(k in low for k in ("invalid_or_expired_otp", "invalid code", "mailbox_otp_timeout")):
+            return msg, False, "otp_timeout"
+
+        # 2. 网络类：cloudflare / turnstile / 网络错误标记 → network，可降级浏览器兜底
+        if any(k in low for k in ("cloudflare", "turnstile")):
+            return msg, True, "network"
+        if any(k in low for k in NETWORK_ERROR_MARKERS):
+            return msg, True, "network"
+
+        # 3. 风控限流类：不降级浏览器
         if any(k in low for k in (
             "deactivated", "registration_disallowed", "max_check_attempts",
-            "invalid_or_expired_otp", "invalid code", "rate_limit", "too_many",
-            "cloudflare", "turnstile",
+            "rate_limit", "too_many", "invalid_grant", "invalid_auth_step",
+            "fraud_guard",
         )):
             return msg, False, "risk_control"
+
         status = getattr(resp, "status_code", 0)
         if status >= 500:
             return msg, True, "server_5xx"
