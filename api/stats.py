@@ -9,12 +9,12 @@ from services.db import get_stats, count_accounts, count_emails
 router = APIRouter()
 
 
-@router.get("/")
+@router.get("/", summary="统计数据", description="注册统计概览：成功/失败/处理中数量等。")
 async def stats() -> dict:
     return get_stats()
 
 
-@router.get("/token-health")
+@router.get("/token-health", summary="Token 健康度", description="token 保鲜巡检健康度：最近一次巡检时间、扫描/刷新/失败数、巡检是否启用。")
 async def token_health() -> dict:
     """token 保鲜巡检健康度（v3.0 G1）。
 

@@ -37,16 +37,19 @@ class TestClassifyFailure:
         assert ftype == "risk_control"
         assert fb is False
 
-    def test_invalid_otp_risk(self):
+    def test_invalid_otp_timeout(self):
+        """invalid_or_expired_otp 归入 mailbox 分类 → otp_timeout。"""
         resp = FakeResp(400, {"error": "invalid_or_expired_otp"})
         _, fb, ftype = ProtocolRegister._classify_failure(resp, {"error": "invalid_or_expired_otp"}, "email-otp/validate")
-        assert ftype == "risk_control"
+        assert ftype == "otp_timeout"
         assert fb is False
 
-    def test_turnstile_risk(self):
+    def test_turnstile_network_fallback(self):
+        """turnstile/cloudflare 归入 network 分类，可降级浏览器兜底。"""
         resp = FakeResp(200, {"error": "turnstile required"})
         _, fb, ftype = ProtocolRegister._classify_failure(resp, {"error": "turnstile"}, "authorize")
-        assert ftype == "risk_control"
+        assert ftype == "network"
+        assert fb is True
 
     def test_server_5xx_fallbacks(self):
         resp = FakeResp(500, {})

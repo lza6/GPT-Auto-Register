@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
+import uuid
 from typing import Any
 
-from services.db import add_log, insert_account, mark_email_status, get_accounts, update_task_progress
+from services.db import add_log, insert_account, mark_email_status, get_accounts, update_task_progress, get_task
 from services.db import mark_platform_usage
 
 
@@ -46,6 +48,7 @@ class RegisterEngine:
         # 暂停/恢复用 asyncio.Event（避免 while+sleep 空转），stop 时 set 唤醒等待槽位
         self._pause_event = asyncio.Event()
         self._pause_event.set()
+        self._trace_id = ""
 
     @property
     def is_running(self) -> bool:

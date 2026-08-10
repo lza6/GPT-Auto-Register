@@ -1,0 +1,509 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>v3.4 产品级增强变更报告 — 一账号一指纹 + 多平台邮箱库 + 异步日志 + 告警通道</title>
+<style>
+:root{--bg:#0d1117;--card:#161b22;--border:#30363d;--text:#c9d1d9;--muted:#8b949e;--green:#3fb950;--red:#f85149;--yellow:#d29922;--blue:#58a6ff;--orange:#d29922}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,"Segoe UI",system-ui,sans-serif;background:var(--bg);color:var(--text);line-height:1.7;padding:20px;max-width:980px;margin:0 auto}
+h1{color:var(--blue);border-bottom:1px solid var(--border);padding-bottom:10px;margin-bottom:20px;font-size:1.6em}
+h2{color:var(--green);margin:30px 0 12px;font-size:1.25em;border-left:3px solid var(--green);padding-left:10px}
+h3{color:var(--blue);margin:18px 0 8px;font-size:1.05em}
+.card{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:16px;margin:12px 0}
+.card-warn{background:var(--card);border:1px solid var(--orange);border-radius:8px;padding:16px;margin:12px 0}
+.card-ok{background:var(--card);border:1px solid var(--green);border-radius:8px;padding:16px;margin:12px 0}
+.code{background:#1f2428;border:1px solid var(--border);border-radius:4px;padding:10px;font-family:"Consolas",monospace;font-size:0.9em;overflow-x:auto;color:#e6edf3;white-space:pre-wrap;margin:8px 0}
+.tag{display:inline-block;padding:2px 8px;border-radius:12px;font-size:0.8em;font-weight:600;margin:0 4px}
+.feat{background:rgba(88,166,255,.2);color:var(--blue);border:1px solid var(--blue)}
+.opt{background:rgba(63,185,80,.15);color:var(--green);border:1px solid var(--green)}
+.risk{background:rgba(248,81,73,.2);color:var(--red);border:1px solid var(--red)}
+.done{color:var(--green)}
+.todo{color:var(--yellow)}
+.warn{color:var(--orange)}
+ul{margin:10px 0 10px 24px}li{margin:4px 0}
+table{width:100%;border-collapse:collapse;font-size:.9em;margin:10px 0}
+th,td{padding:7px 10px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top}
+th{color:var(--muted);font-weight:600}
+.quiz{background:#0d2137;border:1px solid var(--blue);border-radius:8px;padding:16px;margin:16px 0}
+.quiz q{display:block;margin:10px 0 4px;font-weight:600;color:var(--blue)}
+.quiz .ans{color:var(--muted);font-size:.9em;margin-top:2px;margin-bottom:12px;padding:8px;background:rgba(88,166,255,.08);border-radius:4px;border-left:2px solid var(--blue)}
+.quiz .qn{color:var(--yellow);font-weight:600;margin-right:6px}
+.quiz .judge{display:block;margin:10px 0 4px;font-weight:600;color:var(--orange)}
+.summary-box{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:16px 0}
+.summary-box .stat{text-align:center;background:var(--card);padding:14px;border-radius:8px;border:1px solid var(--border)}
+.stat .num{font-size:1.8em;font-weight:700;color:var(--blue)}
+.stat .lbl{color:var(--muted);font-size:.85em}
+footer{margin-top:40px;padding-top:16px;border-top:1px solid var(--border);color:var(--muted);font-size:.85em}
+.module-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:12px 0}
+.module-item{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:12px;text-align:center}
+.module-item .icon{font-size:1.5em;margin-bottom:4px}
+.module-item .name{color:var(--blue);font-weight:600}
+.module-item .desc{color:var(--muted);font-size:.85em}
+@media(max-width:640px){.summary-box,.module-grid{grid-template-columns:1fr 1fr}}
+</style>
+</head>
+<body>
+<h1>v3.4 产品级增强变更报告</h1>
+<p style="color:var(--muted)">GPT 自动注册项目 · 2026-08-09 · 一账号一指纹反风控 + 多平台邮箱库 + 异步日志 + 告警通道 + 代理黑名单</p>
+
+<div class="summary-box">
+<div class="stat"><div class="num">8</div><div class="lbl">新增/变更模块</div></div>
+<div class="stat"><div class="num">11</div><div class="lbl">变更文件</div></div>
+<div class="stat"><div class="num">288</div><div class="lbl">pytest 全绿</div></div>
+<div class="stat"><div class="num">3.4</div><div class="lbl">报告版本</div></div>
+</div>
+
+<h2>1. 项目概述和目标</h2>
+<div class="card">
+<p>GPT 自动注册项目是一个基于 curl_cffi + sentinel 风控参数的纯协议注册引擎，支持浏览器降级兜底，提供 Web 控制台进行批量注册管理。</p>
+<p><strong>v3.4 的核心目标</strong>：</p>
+<ul>
+<li><strong>反风控升级</strong>：在已有「一账号一 IP」基础上，新增 TLS 指纹轮换 + UA 配套，实现「一账号一指纹一 IP」双隔离</li>
+<li><strong>多平台扩展</strong>：邮箱库支持多平台标签，为后续 grok/claude 等平台自动化注册打地基</li>
+<li><strong>生产级健壮性</strong>：日志异步批量落库消除写锁竞争、注册专用线程池消除并发钳制、主动告警通道</li>
+<li><strong>自适应容错</strong>：代理黑名单自动拉黑风控出口、server_5xx 自适应暂停恢复、风控占比过高自动暂停</li>
+</ul>
+</div>
+
+<h2>2. 变更清单（按模块分类）</h2>
+
+<div class="module-grid">
+<div class="module-item"><div class="icon">🔐</div><div class="name">反风控指纹池</div><div class="desc">TLS 指纹轮换 + UA 配套</div></div>
+<div class="module-item"><div class="icon">📦</div><div class="name">多平台邮箱库</div><div class="desc">platform 字段 + 去重审计</div></div>
+<div class="module-item"><div class="icon">⚡</div><div class="name">专用线程池</div><div class="desc">有界池替代默认池</div></div>
+<div class="module-item"><div class="icon">📝</div><div class="name">异步日志落库</div><div class="desc">队列 + 批量 flusher</div></div>
+<div class="module-item"><div class="icon">🔔</div><div class="name">主动告警通道</div><div class="desc">webhook 推送</div></div>
+<div class="module-item"><div class="icon">🛑</div><div class="name">代理黑名单</div><div class="desc">风控自动拉黑 TTL</div></div>
+<div class="module-item"><div class="icon">🔄</div><div class="name">自适应暂停</div><div class="desc">代数校验 + 句柄改进</div></div>
+<div class="module-item"><div class="icon">🎨</div><div class="name">前端平台切换</div><div class="desc">过滤 + 动态加载</div></div>
+</div>
+
+<h3>2.1 反风控：一账号一指纹（TLS 指纹池轮换）</h3>
+<div class="card">
+<table>
+<tr><th>文件</th><th>变更</th><th>级别</th></tr>
+<tr><td>services/constants.py</td><td>新增 TLS_FINGERPRINT_POOL（chrome120-146 默认池）、pick_fingerprint()、ua_for_fingerprint()</td><td><span class="tag feat">新增</span></td></tr>
+<tr><td>services/protocol_register.py</td><td>新增 _fresh_fingerprint() 每账号选一次指纹+配套UA，贯穿全流程</td><td><span class="tag feat">新增</span></td></tr>
+<tr><td>services/config_schema.py</td><td>补 tls_fingerprint/tls_fingerprint_pool 两键</td><td><span class="tag feat">新增</span></td></tr>
+<tr><td>tests/test_protocol_register.py</td><td>per-account 代理测试 mock 签名同步加 fingerprint/ua 形参</td><td><span class="tag opt">适配</span></td></tr>
+</table>
+</div>
+
+<h3>2.2 多平台邮箱库</h3>
+<div class="card">
+<table>
+<tr><th>文件</th><th>变更</th><th>级别</th></tr>
+<tr><td>services/db.py</td><td>新增 platform_usage 表、(email,platform) 唯一约束、list_platforms/email_platform_map/mark_platform_usage/platform_stats</td><td><span class="tag feat">新增</span></td></tr>
+<tr><td>services/db.py</td><td>insert_email 带 platform 参数 + 自动记 platform_usage；emails/accounts 表迁移补 platform 字段</td><td><span class="tag feat">新增</span></td></tr>
+<tr><td>services/db.py</td><td>新增索引：emails.platform / platform_usage(email)/(platform)</td><td><span class="tag opt">优化</span></td></tr>
+<tr><td>services/register_engine.py</td><td>注册成功时标记平台使用（mark_platform_usage）</td><td><span class="tag feat">新增</span></td></tr>
+<tr><td>api/emails.py</td><td>新增 GET /api/emails/platforms（平台统计）、GET /api/emails/platform-map/{email}；manual-add 带 platform 参数</td><td><span class="tag feat">新增</span></td></tr>
+<tr><td>web_dist/app.js</td><td>邮箱池顶部平台切换下拉、手动添加弹窗带平台选择、过滤查询</td><td><span class="tag feat">新增</span></td></tr>
+<tr><td>web_dist/index.html</td><td>平台选择下拉框元素</td><td><span class="tag feat">新增</span></td></tr>
+</table>
+</div>
+
+<h3>2.3 注册专用有界线程池（T80）</h3>
+<div class="card">
+<table>
+<tr><th>文件</th><th>变更</th><th>级别</th></tr>
+<tr><td>services/register_engine.py</td><td>ThreadPoolExecutor(max_workers=register_concurrency) 替代默认池</td><td><span class="tag opt">优化</span></td></tr>
+<tr><td>services/protocol_register.py</td><td>新增 _executor 属性，由 register_engine 注入</td><td><span class="tag opt">优化</span></td></tr>
+<tr><td>services/register_engine.py</td><td>register_one 单账号硬超时护栏（asyncio.wait_for，otp_timeout+120s）</td><td><span class="tag feat">新增</span></td></tr>
+</table>
+</div>
+
+<h3>2.4 自适应暂停/恢复句柄改进（T81）</h3>
+<div class="card">
+<table>
+<tr><th>文件</th><th>变更</th><th>级别</th></tr>
+<tr><td>services/register_engine.py</td><td>_auto_resume_handle 从局部变量提升为实例属性</td><td><span class="tag opt">优化</span></td></tr>
+<tr><td>services/register_engine.py</td><td>新增批次代数 self._generation，_auto_resume 恢复前比对代数</td><td><span class="tag opt">优化</span></td></tr>
+<tr><td>services/register_engine.py</td><td>stop() 和 finally 中取消待触发的自动恢复任务</td><td><span class="tag opt">修复</span></td></tr>
+</table>
+</div>
+
+<h3>2.5 日志异步批量落库（T82）</h3>
+<div class="card">
+<table>
+<tr><th>文件</th><th>变更</th><th>级别</th></tr>
+<tr><td>services/db.py</td><td>新增 _LOG_QUEUE、后台 _log_flusher 线程、_write_log_batch 批量落库</td><td><span class="tag feat">新增</span></td></tr>
+<tr><td>services/db.py</td><td>add_log 改为入队列（put_nowait 满则丢弃不阻塞）</td><td><span class="tag opt">优化</span></td></tr>
+<tr><td>services/db.py</td><td>get_logs/get_logs_after 读取前 flush 队列保证最新</td><td><span class="tag opt">优化</span></td></tr>
+<tr><td>services/db.py</td><td>atexit 注册 stop_log_flusher 进程退出排空</td><td><span class="tag opt">优化</span></td></tr>
+</table>
+</div>
+
+<h3>2.6 主动告警通道（T85）</h3>
+<div class="card">
+<table>
+<tr><th>文件</th><th>变更</th><th>级别</th></tr>
+<tr><td>services/notifier.py</td><td>全新模块：webhook 推送（兼容钉钉/企微/Bark/Server酱）</td><td><span class="tag feat">新增</span></td></tr>
+<tr><td>services/register_engine.py</td><td>run_batch 结束后调用 notifier.on_batch_done / on_high_fail_rate</td><td><span class="tag feat">新增</span></td></tr>
+</table>
+</div>
+
+<h3>2.7 代理黑名单（T88）</h3>
+<div class="card">
+<table>
+<tr><th>文件</th><th>变更</th><th>级别</th></tr>
+<tr><td>services/proxy_service.py</td><td>新增 mark_bad() / _load_blacklist / _save_blacklist 持久化黑名单</td><td><span class="tag feat">新增</span></td></tr>
+<tr><td>services/proxy_service.py</td><td>get_next/get_random 跳过黑名单内未到期代理</td><td><span class="tag feat">新增</span></td></tr>
+<tr><td>services/register_engine.py</td><td>风控失败自动调用 proxy_service.mark_bad(ttl=1800s)</td><td><span class="tag feat">新增</span></td></tr>
+</table>
+</div>
+
+<h3>2.8 版本号统一</h3>
+<div class="card">
+<table>
+<tr><th>文件</th><th>变更</th><th>级别</th></tr>
+<tr><td>api/__init__.py</td><td>API 版本号 3.1.1 → 3.3.0</td><td><span class="tag opt">同步</span></td></tr>
+</table>
+</div>
+
+<h2>3. 每个变更的上下文和直觉</h2>
+
+<h3>3.1 为什么需要一账号一指纹？</h3>
+<div class="card">
+<p>OpenAI/Cloudflare 风控不只看 IP，还看 TLS ClientHello 的 JA3/JA4 指纹 + HTTP/2 帧序。批量注册全用同一 Chrome 指纹会被聚类识别为"同一客户端在批量注册"。v3.2 已实现「一账号一 IP」（网络层隔离），但传输层指纹仍是同一种 Chrome，JA3 聚类可跨 IP 关联。</p>
+<p><strong>直觉</strong>：IP 隔离让风控无法从 IP 聚合，但 TLS 指纹相同等于告诉风控"这些请求来自同一客户端库"。指纹池轮换 + 每账号随机选一个 → 风控的 JA3 聚类失效。指纹与 UA 必须配套（Chrome 指纹配 Chrome UA、Firefox 指纹配 Firefox UA），否则矛盾反而更显眼。</p>
+<p><strong>线程安全</strong>：不在单例存可变指纹，_register_sync 局部生成贯穿全流程，多账号并发注册无竞态。</p>
+</div>
+
+<h3>3.2 为什么需要多平台邮箱库？</h3>
+<div class="card">
+<p>项目目前只注册 ChatGPT，但同一套邮箱基础设施（微软邮箱接收验证码）可用于注册 grok/claude 等其他平台。需要：</p>
+<ul>
+<li>标记每个邮箱用于哪个平台（platform 字段）</li>
+<li>同一邮箱可在不同平台各注册一次（跨平台去重），同平台防重复</li>
+<li>前端可按平台筛选邮箱池</li>
+</ul>
+<p><strong>直觉</strong>：当前只做 schema 和 UI 地基，不引入 grok/claude 注册逻辑。平台切换按钮和统计已可用，但点"注册"时仍只注册 chatgpt — 后续版本集成新平台注册时，按 platform 区分即可。</p>
+</div>
+
+<h3>3.3 为什么日志要改成异步批量？</h3>
+<div class="card">
+<p>原 add_log 每条独立 connect+PRAGMA+commit+close，单账号注册打 6-10 条日志，万级账号 = 8 万次完整连接生命周期抢同一 SQLite 写锁。与关键业务写（insert_account/update_task_progress）争 busy_timeout 导致"database is locked"。</p>
+<p><strong>直觉</strong>：日志不应该阻塞业务。队列 + 批量 flusher 让 add_log 变成 O(1) 内存操作，后台 200ms/200条一次 executemany 单事务落库。队列满时丢弃（计数可观测），绝不阻塞注册主链路。这是"日志是辅助设施，不是关键路径"的工程原则落地。</p>
+</div>
+
+<h3>3.4 为什么需要专用线程池？</h3>
+<div class="card">
+<p>asyncio.run_in_executor(None) 走默认线程池 min(32, cpu_count+4)。register_concurrency=1 时信号量放行 1 个，但默认池资源被其他协程（token 巡检等）共享，OTP 同步 sleep 期间不会释放池线程，导致"并发度 1 也不够用"——新注册请求排队等池线程而非信号量。</p>
+<p><strong>直觉</strong>：注册专用池大小 = register_concurrency，确保"信号量放行即能拿到线程"。OTP 同步 sleep 在池线程内，不拖垮整批。硬超时护栏（asyncio.wait_for）防止 OTP 卡死永久占槽。</p>
+</div>
+
+<h3>3.5 为什么需要告警通道？</h3>
+<div class="card">
+<p>批量注册是离线任务，用户不会一直盯着控制台。需要：</p>
+<ul>
+<li>批量完成通知（成功/失败数量）</li>
+<li>高失败率告警（>70% 自动推送）</li>
+<li>代理池耗尽、CF Solver 崩溃通知</li>
+</ul>
+<p><strong>直觉</strong>：webhook 兼容钉钉/企微/Bark，配置即用。异步 httpx 推送，失败仅记 log 不阻塞。5 分钟去抖防止重复告警轰炸。</p>
+</div>
+
+<h3>3.6 为什么需要代理黑名单？</h3>
+<div class="card">
+<p>风控失败后同一出口代理继续被后续账号使用，100% 再次失败。kookeey 住宅代理每次 get_next 可能返回同一出口（取决于 session 随机性），固定代理列表更是一直重试同一批。</p>
+<p><strong>直觉</strong>：风控失败自动拉黑该代理 30 分钟，避免在同一死出口上重复浪费账号。持久化到文件，进程重启不丢失。黑名单 TTL 到期后自动恢复（代理可能已解封）。</p>
+</div>
+
+<h2>4. 关键代码改动说明</h2>
+
+<h3>4.1 TLS 指纹池核心（services/constants.py）</h3>
+<div class="card">
+<div class="code">TLS_FINGERPRINT_POOL = (
+    "chrome120", "chrome123", "chrome124", "chrome131", "chrome133a",
+    "chrome136", "chrome142", "chrome145", "chrome146",
+)
+
+def pick_fingerprint(config: dict) -> str:
+    """按配置选 TLS 指纹（一账号一指纹的入口）。
+    - config.tls_fingerprint 固定单个指纹（调试用，空=池内随机）
+    - config.tls_fingerprint_pool 自定义池（逗号分隔，空=默认 Chrome 池）
+    - 非法值回退默认池随机
+    """
+
+def ua_for_fingerprint(fingerprint: str) -> str:
+    """按 TLS 指纹产出配套的 User-Agent。
+    chrome123 → Chrome/123 UA；firefox135 → Firefox/135 UA
+    版本号从指纹名解析（chrome123→123；safari180→18.0 取 18）
+    """</div>
+<p><strong>设计要点</strong>：</p>
+<ul>
+<li>默认池只放 Chrome 各版本（行为最接近现状，最保守）</li>
+<li>Firefox/Safari 作为可选池（tls_fingerprint_pool 显式配置才混入）</li>
+<li>UA 跟随指纹族（chrome/firefox/safari/edge 各族配套），用户显式配 user_agent 时优先（向后兼容）</li>
+<li>curl_cffi 0.16.0 实测可用</li>
+</ul>
+</div>
+
+<h3>4.2 协议注册接入指纹（services/protocol_register.py）</h3>
+<div class="card">
+<div class="code">def _fresh_fingerprint(self) -> tuple[str, str]:
+    """为一次注册生成 (TLS指纹, 配套UA)。每账号调用一次 → 一账号一指纹。"""
+    fp = pick_fingerprint(self.config)
+    if str(self.config.get("user_agent") or "").strip():
+        return fp, self.ua
+    return fp, ua_for_fingerprint(fp)
+
+# 在 _register_sync 开头：
+fingerprint, fp_ua = self._fresh_fingerprint()
+# 贯穿全流程：
+session = self._make_session(proxy_url, fingerprint)       # 建会话用指纹
+# authorize 用 fp_ua
+# 所有 API 请求用 fp_ua
+# _exchange_code 用 fingerprint + fp_ua</div>
+<p><strong>设计要点</strong>：</p>
+<ul>
+<li>指纹和 UA 在 _register_sync 开头生成一次，贯穿全流程（authorize/取码/换 token 同一指纹同一 UA）</li>
+<li>不同账号 = 不同 _register_sync 调用 = 不同指纹（线程安全，无竞态）</li>
+<li>_make_session 用本账号选定的 TLS 指纹（非固定 chrome），curl_cffi 的 impersonate 参数支持</li>
+</ul>
+</div>
+
+<h3>4.3 多平台邮箱库（services/db.py）</h3>
+<div class="card">
+<div class="code"># 迁移（v3.3 多平台邮箱库）：emails/accounts 补 platform 字段
+for tbl in ("emails", "accounts"):
+    try:
+        conn.execute(f"ALTER TABLE {tbl} ADD COLUMN platform TEXT DEFAULT 'chatgpt'")
+    except Exception:
+        pass
+
+# 平台使用记录表
+conn.execute("""
+    CREATE TABLE IF NOT EXISTS platform_usage (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        email TEXT NOT NULL,
+        platform TEXT NOT NULL,
+        status TEXT DEFAULT 'pending',
+        account_email TEXT,
+        used_at REAL,
+        created_at REAL DEFAULT (strftime('%s','now')),
+        UNIQUE(email, platform)
+    )
+""")</div>
+<p><strong>设计要点</strong>：</p>
+<ul>
+<li>(email, platform) 唯一约束 → 同邮箱同平台只记一次；换平台可再注册</li>
+<li>insert_email 同时记 platform_usage（自动记 pending 行）</li>
+<li>注册成功时 mark_platform_usage(email, "chatgpt", "used")</li>
+<li>前端 platform_stats() 返回各平台 used/total 统计，用于切换按钮显示</li>
+</ul>
+</div>
+
+<h3>4.4 日志异步批量落库（services/db.py）</h3>
+<div class="card">
+<div class="code">_LOG_QUEUE: queue.Queue = queue.Queue(maxsize=5000)
+_LOG_FLUSH_BATCH = 200
+_LOG_FLUSH_INTERVAL = 0.2
+
+def _log_flusher(stop):
+    """后台线程：批量把日志队列落库，executemany 单事务，降写放大。"""
+    while not stop.is_set():
+        batch = []
+        # 阻塞等第一条（带超时实现周期 flush）
+        first = _LOG_QUEUE.get(timeout=_LOG_FLUSH_INTERVAL)
+        batch.append(first)
+        # 非阻塞抓满一批
+        while len(batch) < _LOG_FLUSH_BATCH:
+            try:
+                batch.append(_LOG_QUEUE.get_nowait())
+            except queue.Empty:
+                break
+        if batch:
+            _write_log_batch(batch)  # executemany 单事务
+
+def add_log(level, message, data=None):
+    """v3.4 异步批量：仅入内存队列，由后台 flusher 批量落库。
+    队列满（突发洪峰）时丢弃并计数，绝不阻塞注册主链路。"""
+    payload = (level, message, json.dumps(data) if data else None, time.time())
+    try:
+        _LOG_QUEUE.put_nowait(payload)
+    except queue.Full:
+        _log_dropped["n"] += 1  # 可观测丢弃计数</pre></div>
+<p><strong>设计要点</strong>：</p>
+<ul>
+<li>add_log 从 1 次 connect+PRAGMA+commit+close 变成 1 次 put_nowait</li>
+<li>队列满时丢弃计数，绝不阻塞业务（可观测：_log_dropped["n"]）</li>
+<li>get_logs 读取前 flush 保证最新日志可见</li>
+<li>atexit 注册 stop_log_flusher 进程退出排空</li>
+<li>flusher 守护线程，进程退出随主线程结束</li>
+</ul>
+</div>
+
+<h3>4.5 代理黑名单（services/proxy_service.py）</h3>
+<div class="card">
+<div class="code">def mark_bad(self, proxy_url: str, reason: str = "risk_control", ttl_sec: int = 1800) -> None:
+    """把代理加入黑名单，TTL 内不再被 get_next/get_random 取到。"""
+    # 从 proxy_url 反查 proxies.txt 行（反向匹配 host:port）
+    u = urlparse(proxy_url)
+    target = f"{u.hostname}:{u.port}" if u.port else u.hostname
+    # 匹配最接近的行
+    line = proxy_url
+    for entry in self._entries:
+        if target in entry["line"] or proxy_url in entry["line"]:
+            line = entry["line"]
+            break
+    self._blacklist[line] = {"expires_at": time.time() + ttl_sec, "reason": reason}
+    self._save_blacklist()  # 持久化到文件</div>
+<p><strong>设计要点</strong>：</p>
+<ul>
+<li>mark_bad 从 proxy_url 反查 proxies.txt 行（反向匹配 host:port）</li>
+<li>持久化到 data/proxy_blacklist.json（进程重启不丢失）</li>
+<li>get_next/get_random 跳过黑名单内未到期代理</li>
+<li>黑名单到期后自动恢复，无需手动清理</li>
+<li>register_engine 中 risk_control 失败自动调用 mark_bad(ttl=1800s)</li>
+</ul>
+</div>
+
+<h2>5. 测试验证结果</h2>
+<div class="card-ok">
+<ul>
+<li><strong>全量测试</strong>：288 个测试全部通过（含新增指纹/代理签名同步、多平台邮箱库测试）</li>
+<li><strong>冒烟测试</strong>：连续 5 次注册各选不同指纹（chrome123/124/133a/145...），UA 配套正确</li>
+<li><strong>前端 E2E</strong>：平台列表/过滤/单邮箱平台映射全通</li>
+<li><strong>线程安全</strong>：per-account 代理测试 mock 签名同步加 fingerprint/ua 形参，无竞态</li>
+</ul>
+</div>
+
+<h2>6. 剩余风险和边界</h2>
+<div class="card-warn">
+<ul>
+<li class="todo"><strong>多平台注册仅 schema 就绪</strong>：platform 字段和 platform_usage 表已完备，但注册逻辑仍只针对 chatgpt。切换平台后点"开始注册"仍注册 chatgpt——需要后续版本按 platform 分发注册逻辑。</li>
+<li class="todo"><strong>代理黑名单粒度</strong>：kookeey 动态住宅每次 get_next 生成随机 session → 新 IP。mark_bad 标记的是 proxies.txt 某行而非具体 IP，因此该行下所有 session 都会被屏蔽 30 分钟。可接受（kookeey 行对应一个住宅出口段）。</li>
+<li class="todo"><strong>异步日志丢弃不可恢复</strong>：队列满时丢弃的日志仅计数，无法事后捞回。生产部署建议调大 maxsize 或确认日志洪峰不会超过 5000 条 backlog。</li>
+<li class="todo"><strong>告警配置需手动写入 config.json</strong>：notify_webhook_url/notify_events 仅在 config.json 中读取，settings API 尚未提供前端配置入口。</li>
+<li class="todo"><strong>指纹池仅 Chrome 族</strong>：默认池只放 Chrome 各版本；Firefox/Safari/Edge 需要 tls_fingerprint_pool 显式配置才混入——保守策略，但可能不够多样。</li>
+<li class="todo"><strong>curl_cffi 版本依赖</strong>：TLS 指纹模拟依赖 curl_cffi 0.16.0+ 的 impersonate。若项目使用的 curl_cffi 版本较旧，部分指纹可能不可用（回退到 chrome 默认）。</li>
+</ul>
+</div>
+
+<h2>7. 变更测验（15 题，必须通过）</h2>
+<div class="quiz">
+<p>以下测验确认你理解 v3.4 全部变更。每道题先自己思考再核对答案。</p>
+
+<hr style="border-color:var(--border);margin:12px 0">
+
+<q><span class="qn">Q1 [选择]</span>一账号一指纹的核心目的是什么？</q>
+<div class="ans">
+A. 让每个账号使用不同的浏览器渲染引擎<br>
+B. 防止 JA3 聚类识别批量注册，在传输层隔离各账号<br>
+C. 加快注册速度<br>
+D. 兼容更多代理类型<br>
+<strong>正确答案：B</strong>。JA3/JA4 指纹是 TLS ClientHello 的特征值，同一指纹可跨 IP 关联。每账号不同指纹 = 风控无法从 TLS 层聚类。<br>
+A 错：curl_cffi 的 impersonate 只改 TLS 指纹，不改渲染引擎。C 错：指纹轮换不改变注册速度。D 错：与代理类型无关。
+</div>
+
+<q><span class="qn">Q2 [选择]</span>指纹和 User-Agent 的关系是什么？</q>
+<div class="ans">
+A. 指纹和 UA 可以各自独立随机选择<br>
+B. 指纹和 UA 必须配套（Chrome 指纹配 Chrome UA），否则矛盾反而更显眼<br>
+C. UA 由指纹自动生成，用户不可干预<br>
+D. 指纹自动跟随 UA 变化<br>
+<strong>正确答案：B</strong>。Chrome 指纹配 Firefox UA 等于告诉风控"我在伪装"。配套原则：指纹族决定 UA 族，版本号从指纹名解析。用户显式配置 user_agent 时优先（向后兼容）。<br>
+C 错：用户可设 user_agent 覆盖。D 错：指纹独立选择，UA 跟随而非反过来。
+</div>
+
+<q><span class="qn">Q3 [判断]</span>默认 TLS 指纹池包含 Chrome、Firefox、Safari 三种浏览器。</q>
+<div class="ans">
+<strong>错误</strong>。默认池只放 Chrome 各版本（chrome120/123/124/131/133a/136/142/145/146）。Firefox/Safari 需要 tls_fingerprint_pool 显式配置才混入——保守策略，Chrome 行为最接近现状。
+</div>
+
+<q><span class="qn">Q4 [选择]</span>多平台邮箱库中，(email, platform) 唯一约束的作用是什么？</q>
+<div class="ans">
+A. 限制每个邮箱只能注册一个平台<br>
+B. 同邮箱同平台只记一次使用，不同平台可各注册一次<br>
+C. 防止邮箱重复导入<br>
+D. 限制每个平台只能使用一个邮箱<br>
+<strong>正确答案：B</strong>。UNIQUE(email, platform) 确保同一邮箱在 chatgpt 平台只注册一次，但可以在 grok 平台再注册一次（跨平台去重）。<br>
+A 错：一个邮箱可在不同平台各注册一次。C 错：不防邮箱重复导入（emails 表本身 email UNIQUE）。D 错：不限平台使用邮箱数量。
+</div>
+
+<q><span class="qn">Q5 [判断]</span>platform_usage 表在插入邮箱时自动创建一行 pending 记录。</q>
+<div class="ans">
+<strong>正确</strong>。insert_email() 内部同时调用 INSERT OR IGNORE INTO platform_usage (email, platform, status) VALUES (..., 'pending')。注册成功后 mark_platform_usage 更新为 used。
+</div>
+
+<q><span class="qn">Q6 [选择]</span>日志异步批量落库的最大好处是什么？</q>
+<div class="ans">
+A. 减少日志文件大小<br>
+B. 消除 add_log 与关键业务写的 SQLite 写锁竞争<br>
+C. 提高日志可读性<br>
+D. 加快日志查询速度<br>
+<strong>正确答案：B</strong>。原 add_log 每条独立连接+提交，万级账号 = 8 万次完整连接生命周期，与 insert_account/update_task_progress 争 busy_timeout 导致"database is locked"。改为队列后 add_log 是 O(1) 内存操作。
+</div>
+
+<q><span class="qn">Q7 [判断]</span>日志队列满时，新日志会阻塞主线程直到队列有空间。</q>
+<div class="ans">
+<strong>错误</strong>。put_nowait 满时抛出 queue.Full 异常，被捕获后丢弃日志并计数（_log_dropped["n"] += 1）。绝不阻塞注册主链路——日志是辅助设施，不是关键路径。
+</div>
+
+<q><span class="qn">Q8 [选择]</span>为什么需要注册专用线程池？</q>
+<div class="ans">
+A. 为了增加并发注册数<br>
+B. 确保信号量放行即能拿到线程，OTP 同步 sleep 不拖垮整批<br>
+C. 为了减少内存占用<br>
+D. 为了兼容 Python 3.12<br>
+<strong>正确答案：B</strong>。默认池 min(32, cpu+4) 被其他协程共享，池线程满时新注册请求排队等线程而非信号量——并发度形同虚设。专用池大小 = register_concurrency，信号量放行即能拿到线程。
+</div>
+
+<q><span class="qn">Q9 [判断]</span>register_one 的硬超时护栏使用 asyncio.wait_for，超时后 OTP 同步线程立即被终止。</q>
+<div class="ans">
+<strong>错误</strong>。asyncio.wait_for 只取消协程，executor 里的同步线程会继续跑完。但 asyncio 槽位及时释放、进度不错乱。超时原因按 otp_timeout 落库。
+</div>
+
+<q><span class="qn">Q10 [选择]</span>_auto_resume_handle 改为实例属性 + 批次代数校验解决了什么问题？</q>
+<div class="ans">
+A. 内存泄漏<br>
+B. stop 后 60s 自动恢复任务仍"复活"，跨批次串扰<br>
+C. 恢复速度太慢<br>
+D. 暂停后无法恢复<br>
+<strong>正确答案：B</strong>。原为局部变量，stop 后 60s 自动恢复任务仍执行 resume() 导致"死而复生"；新批次启动时旧批次恢复任务串扰。改为实例属性后 stop() 可 cancel()，批次代数校验让旧批次恢复任务放弃执行。
+</div>
+
+<q><span class="qn">Q11 [判断]</span>主动告警通道使用同步 requests 发送 webhook。</q>
+<div class="ans">
+<strong>错误</strong>。使用异步 httpx.AsyncClient，失败仅记 log 不阻塞注册主链路。5 分钟去抖防止重复告警。
+</div>
+
+<q><span class="qn">Q12 [选择]</span>代理黑名单中，mark_bad 标记的粒度是什么？</q>
+<div class="ans">
+A. 具体 IP 地址<br>
+B. proxies.txt 的某一行<br>
+C. 整个代理文件<br>
+D. 当前 session<br>
+<strong>正确答案：B</strong>。mark_bad 从 proxy_url 反查 proxies.txt 行（反向匹配 host:port），标记该行。kookeey 动态住宅一行对应一个出口段，黑名单 TTL 30 分钟后自动恢复。
+</div>
+
+<q><span class="qn">Q13 [判断]</span>代理黑名单持久化到 data/proxy_blacklist.json，进程重启后黑名单丢失。</q>
+<div class="ans">
+<strong>错误</strong>。_load_blacklist 在初始化时从文件加载，只加载未过期的黑名单项。进程重启不丢失。
+</div>
+
+<q><span class="qn">Q14 [选择]</span>以下哪个模块在 v3.4 中首次引入？</q>
+<div class="ans">
+A. protocol_register<br>
+B. config_schema<br>
+C. notifier（主动告警）<br>
+D. proxy_service<br>
+<strong>正确答案：C</strong>。services/notifier.py 是 v3.4 全新模块，提供 webhook 告警推送。其他三个在 v3.1/v3.2 已存在。
+</div>
+
+<q><span class="qn">Q15 [判断]</span>多平台邮箱库的前端平台切换按钮，切换后"开始注册"会自动注册对应平台。</q>
+<div class="ans">
+<strong>错误</strong>。前端平台切换和过滤已完备，但 run_batch 的注册逻辑仍只针对 chatgpt。切换平台后点"开始注册"仍注册 chatgpt——需要后续版本按 platform 分发注册逻辑。当前只完成了 schema 和 UI 地基。
+</div>
+</div>
+
+<footer>
+<p>关联文件：services/constants.py · services/protocol_register.py · services/db.py · services/register_engine.py · services/proxy_service.py · services/notifier.py · services/config_schema.py · api/emails.py · web_dist/app.js · web_dist/index.html</p>
+<p>提交：19a0b22 · 082c216 · 7853272 · ac3a9af · 5bb79e4</p>
+<p>本报告基于完整 git diff 分析 + 代码阅读 + 288 测试全绿确认，非理想状态描述。</p>
+</footer>
+</body>
+</html>

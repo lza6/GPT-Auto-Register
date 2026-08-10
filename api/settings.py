@@ -6,6 +6,8 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from api.models import SettingsResponse
+
 from services.db import get_setting, set_setting
 
 router = APIRouter()
