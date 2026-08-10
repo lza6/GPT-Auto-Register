@@ -54,7 +54,7 @@ async def save_proxies(req: SaveProxiesRequest) -> dict:
     return {"success": True, "count": _count_lines(req.content), "active_count": proxy_service.count}
 
 
-@router.get("/health")
+@router.get("/health", summary="代理健康探测", description="批量探测代理池可用性：TCP 连通性 + HTTP 出口 IP 验证，返回每条代理的健康状态/出口IP/国家/延迟。")
 async def proxies_health() -> dict:
     """批量探测代理池可用性（v3.4 T88：升级为真实 HTTP 出口探测）。
 
