@@ -32,6 +32,7 @@ COPY services ./services
 COPY cf_solver ./cf_solver
 COPY web_dist ./web_dist
 COPY config.example.json ./config.json
+COPY sensitive_policy.json ./
 
 RUN mkdir -p /app/data /app/logs
 EXPOSE 23457 8001
