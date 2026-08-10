@@ -113,3 +113,12 @@ async def get_config() -> dict:
     if CONFIG_PATH.exists():
         return _mask_sensitive(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
     return {}
+
+
+@router.post("/vacuum")
+async def trigger_vacuum() -> dict:
+    """手动触发数据库 VACUUM。"""
+    from services.db import vacuum_if_needed
+
+    result = vacuum_if_needed(force=True)
+    return {"status": result}

@@ -22,7 +22,7 @@ CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
 DEFAULT_AUTH_PLACEHOLDERS = {"", "请修改为你的管理密钥", "change-me"}
 
 # 无需鉴权的 API 白名单（健康检查等）
-PUBLIC_API_PATHS = {"/api/healthz"}
+PUBLIC_API_PATHS = {"/api/healthz", "/metrics"}
 
 
 def load_config() -> dict:
@@ -223,6 +223,14 @@ def create_app() -> FastAPI:
         except Exception as e:
             log.warning(f"shutdown: token 巡检停止异常: {e}")
 
+        # B9：停止代理池自动清理后台线程
+        try:
+            from services.proxy_service import proxy_service
+            proxy_service.stop_cleanup()
+            log.info("shutdown: 代理池自动清理已停止")
+        except Exception as e:
+            log.warning(f"shutdown: 代理池自动清理停止异常: {e}")
+
     # token 保鲜巡检：startup 事件（async 上下文）内启动后台任务（v3.0 G1）
     # 注意：不能在 create_app 同步执行，create_task 需 running event loop
     token_refresh_enabled = _resolve_token_refresh_enabled(config)
@@ -231,6 +239,13 @@ def create_app() -> FastAPI:
     async def startup_handler() -> None:
         import logging
         log = logging.getLogger("gpt-register")
+        # 启动代理池自动清理（B9）
+        try:
+            from services.proxy_service import proxy_service
+            proxy_service.start_cleanup()
+            log.info("代理池自动清理后台线程已启动（每 30min 检查一次）")
+        except Exception as e:
+            log.warning(f"代理池自动清理启动失败: {e}")
         if token_refresh_enabled:
             try:
                 from services.token_refresher import get_token_refresher
@@ -238,6 +253,24 @@ def create_app() -> FastAPI:
                 log.info("token 巡检任务已启动")
             except Exception as e:
                 log.warning(f"token 巡检启动失败: {e}")
+
+        # B16: 每日凌晨 4 点定时 VACUUM
+        async def _vacuum_loop() -> None:
+            import asyncio
+            import time as _time
+            _log = logging.getLogger("gpt-register.vacuum")
+            while True:
+                now = _time.localtime()
+                seconds_till_4am = ((4 - now.tm_hour + 24) % 24) * 3600 - now.tm_min * 60 - now.tm_sec
+                if seconds_till_4am <= 0:
+                    seconds_till_4am += 86400
+                await asyncio.sleep(seconds_till_4am)
+                from services.db import vacuum_if_needed
+                result = vacuum_if_needed()
+                _log.info("定时 VACUUM: %s", result)
+
+        import asyncio
+        asyncio.create_task(_vacuum_loop())
 
     app.include_router(register_router.router, prefix="/api/register", tags=["register"])
     app.include_router(stats_router.router, prefix="/api/stats", tags=["stats"])

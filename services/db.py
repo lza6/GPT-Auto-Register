@@ -456,6 +456,15 @@ def get_latest_task() -> dict | None:
     return dict(row) if row else None
 
 
+def get_task_history(limit: int = 50) -> list[dict]:
+    """返回最近任务历史（按 id 倒序），供前端任务历史查看。"""
+    with db_session() as conn:
+        rows = conn.execute(
+            "SELECT * FROM tasks ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def reset_stale_tasks() -> int:
     """服务启动时把遗留的 running 任务标记为 interrupted（断点续跑信号）。
 
@@ -467,6 +476,70 @@ def reset_stale_tasks() -> int:
             (time.time(),),
         )
     return cur.rowcount
+
+
+# === VACUUM 策略 ===
+import time as _time
+import logging as _logging
+
+_log = _logging.getLogger("gpt-register.vacuum")
+
+VACUUM_DELETE_RATIO = 0.20
+VACUUM_FILE_SIZE_MB = 50
+
+_last_vacuum_time: float = 0.0
+
+
+def _get_db_path() -> Path:
+    return DB_PATH
+
+
+def _get_deleted_ratio() -> float:
+    conn = get_conn()
+    try:
+        total, deleted = 0, 0
+        for tbl in ("emails", "accounts", "logs", "platform_usage"):
+            row = conn.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()
+            total += row[0] if row else 0
+            try:
+                drow = conn.execute(f"SELECT COUNT(*) FROM {tbl} WHERE status='deleted'").fetchone()
+                deleted += drow[0] if drow else 0
+            except Exception:
+                pass
+        return deleted / max(total, 1)
+    finally:
+        conn.close()
+
+
+def vacuum_if_needed(force: bool = False) -> str:
+    global _last_vacuum_time
+    db_path = _get_db_path()
+    if not db_path.exists():
+        return "skipped:no_db"
+    size_mb = db_path.stat().st_size / 1024 / 1024
+    if not force:
+        if size_mb < VACUUM_FILE_SIZE_MB:
+            return f"skipped:file_size={size_mb:.1f}MB<{VACUUM_FILE_SIZE_MB}MB"
+        ratio = _get_deleted_ratio()
+        if ratio < VACUUM_DELETE_RATIO:
+            return f"skipped:delete_ratio={ratio:.2%}<{VACUUM_DELETE_RATIO:.0%}"
+    try:
+        conn = get_conn()
+        try:
+            conn.execute("VACUUM")
+            conn.commit()
+            _last_vacuum_time = _time.time()
+            _log.info("VACUUM 完成（force=%s, size=%.1fMB）", force, size_mb)
+            return "ok"
+        finally:
+            conn.close()
+    except Exception as e:
+        _log.error("VACUUM 失败: %s", e)
+        return f"error:{e}"
+
+
+def get_last_vacuum_time() -> float:
+    return _last_vacuum_time
 
 
 init_db()
