@@ -39,3 +39,5 @@ def test_metrics_contains_engine_state(client: TestClient):
     assert "engine_queue_depth" in resp.text
     assert "engine_concurrency" in resp.text
     assert "proxy_pool_size" in resp.text
+    assert "db_file_size_bytes" in resp.text
+    assert "last_vacuum_timestamp" in resp.text

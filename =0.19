@@ -1,5 +1,1 @@
-Collecting prometheus-client
-  Using cached prometheus_client-0.26.0-py3-none-any.whl.metadata (2.1 kB)
-Using cached prometheus_client-0.26.0-py3-none-any.whl (64 kB)
-Installing collected packages: prometheus-client
-Successfully installed prometheus-client-0.26.0
+/usr/bin/bash: line 1: pip: command not found

@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlencode
 
+import json
+
 import requests
 
 from services.sentinel import build_sentinel_token
@@ -48,6 +50,75 @@ USER_AGENT = (
 
 # 各端点对应的 sentinel flow（抓包确认）
 FLOW_REGISTER = "username_password_create"
+
+# ── 错误分类常量 ──
+NETWORK_ERROR_MARKERS = (
+    "tls", "ssl", "sslerror", "eof occurred", "connection",
+    "connect error", "timeout", "timed out", "proxy",
+    "socks", "dns", "name resolution", "winerror 10060",
+    "curl: (35)", "curl: (28)", "curl: (6)", "curl: (7)",
+    "remote disconnected", "connection reset", "connection aborted",
+    "max retries exceeded", "sentinel", "cloudflare", "turnstile",
+    "broken pipe", "certificate verify failed", "econnrefused",
+    "econnreset", "etimedout",
+)
+ACCOUNT_ERROR_MARKERS = (
+    "account_deactivated", "account deactivated", "account has been deactivated",
+    "deleted or deactivated", "registration_disallowed",
+    "invalid_grant", "authenticationfailed", "invalid credentials",
+    "wrong_email_otp_code", "password_verify_failed",
+    "phone_recently_used", "unsupported_phone_number", "fraud_guard",
+    "token_invalidated", "max_check_attempts",
+)
+MAILBOX_ERROR_MARKERS = (
+    "outlook otp timeout", "email_otp_poll_timeout", "mailbox otp timeout",
+    "invalid_or_expired_otp", "invalid code", "mailbox_otp_timeout",
+    "otp timeout",
+)
+AUTH_STATE_ERROR_MARKERS = (
+    "invalid_auth_step", "invalid_state", "sign-in session is no longer valid",
+)
+RATE_LIMIT_MARKERS = (
+    "rate_limit", "too_many", "429", "too many", "ratelimit",
+)
+
+
+def error_text(value) -> str:
+    if isinstance(value, dict):
+        parts = []
+        for key in ("error", "error_code", "message", "body", "status"):
+            item = value.get(key)
+            if item:
+                parts.append(str(item))
+        for key in ("refresh", "oauth", "relogin", "token_probe"):
+            item = value.get(key)
+            if isinstance(item, dict):
+                parts.append(error_text(item))
+        if not parts:
+            try:
+                parts.append(json.dumps(value, ensure_ascii=False, default=str)[:1000])
+            except Exception:
+                pass
+        return " ".join(parts).lower()
+    return str(value or "").lower()
+
+
+def classify_error(value) -> str:
+    text = error_text(value)
+    if any(marker in text for marker in ACCOUNT_ERROR_MARKERS):
+        return "account"
+    if any(marker in text for marker in MAILBOX_ERROR_MARKERS):
+        return "mailbox"
+    if any(marker in text for marker in NETWORK_ERROR_MARKERS):
+        return "network"
+    if any(marker in text for marker in AUTH_STATE_ERROR_MARKERS):
+        return "auth_state"
+    if any(marker in text for marker in RATE_LIMIT_MARKERS):
+        return "rate_limit"
+    return "unknown"
+
+
+# ── 错误分类常量结束 ──
 FLOW_OTP = "email_otp_validate"
 FLOW_CREATE = "create_account"
 
@@ -732,18 +803,21 @@ class ProtocolRegister:
         low = (text + resp_text).lower()
         msg = f"{step} 失败 HTTP {getattr(resp, 'status_code', '?')}: {text or ''}"
 
-        # 1. OTP 超时类：invalid_or_expired_otp / invalid code → otp_timeout，不降级
-        if any(k in low for k in ("invalid_or_expired_otp", "invalid code")):
+        # 1. OTP 超时类：invalid_or_expired_otp / invalid code / mailbox_otp_timeout → otp_timeout，不降级
+        if any(k in low for k in ("invalid_or_expired_otp", "invalid code", "mailbox_otp_timeout")):
             return msg, False, "otp_timeout"
 
-        # 2. 网络类：cloudflare / turnstile → network，可降级浏览器兜底
+        # 2. 网络类：cloudflare / turnstile / 网络错误标记 → network，可降级浏览器兜底
         if any(k in low for k in ("cloudflare", "turnstile")):
+            return msg, True, "network"
+        if any(k in low for k in NETWORK_ERROR_MARKERS):
             return msg, True, "network"
 
         # 3. 风控限流类：不降级浏览器
         if any(k in low for k in (
             "deactivated", "registration_disallowed", "max_check_attempts",
-            "rate_limit", "too_many",
+            "rate_limit", "too_many", "invalid_grant", "invalid_auth_step",
+            "fraud_guard",
         )):
             return msg, False, "risk_control"
 

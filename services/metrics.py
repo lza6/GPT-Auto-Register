@@ -75,7 +75,9 @@ def _refresh_system_gauges() -> None:
         from services.register_engine import register_engine
         if register_engine is not None:
             engine_running.set(1 if register_engine.is_running else 0)
-            # 队列深度和并发度暂为 0（无直接接口），占位预留
+            # 并发度：从引擎获取当前活跃槽位数
+            concurrency = getattr(register_engine, "_current_concurrency", None) or 0
+            engine_concurrency.set(concurrency)
     except Exception:
         pass
     # 刷新代理池大小
@@ -84,5 +86,11 @@ def _refresh_system_gauges() -> None:
         if proxy_service is not None:
             pool = getattr(proxy_service, "_pool", None) or getattr(proxy_service, "proxies", None) or []
             proxy_pool_size.set(len(pool) if isinstance(pool, (list, set)) else 0)
+    except Exception:
+        pass
+    # 刷新 VACUUM 时间戳
+    try:
+        from services.db import get_last_vacuum_time
+        last_vacuum_timestamp.set(get_last_vacuum_time())
     except Exception:
         pass
