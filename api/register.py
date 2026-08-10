@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 from services.db import (
     add_log, get_pending_emails, get_accounts, get_stats,
-    get_conn, get_latest_task, db_session, count_accounts,
+    get_conn, get_latest_task, db_session, count_accounts, requeue_failed_emails,
 )
 from services.register_engine import get_engine
 from services.email_service import email_service
@@ -25,6 +25,13 @@ router = APIRouter()
 def _load_config() -> dict[str, Any]:
     from api import load_config
     return load_config()
+
+from api.models import (
+    ApiResponse,
+    RegisterStatusResponse,
+    AccountListResponse,
+    ClearResponse,
+)
 
 
 class ImportEmailsRequest(BaseModel):
@@ -43,7 +50,11 @@ class ClearRequest(BaseModel):
     confirm: str = ""
 
 
-@router.post("/import-emails")
+class RetryFailedRequest(BaseModel):
+    failure_type: str = ""
+
+
+@router.post("/import-emails", summary="导入邮箱", description="从配置的邮箱源 URL 拉取待注册邮箱。")
 async def import_emails(req: ImportEmailsRequest) -> dict:
     config = _load_config()
     source_url = req.source_url or config.get("email_source_url", "")
@@ -53,7 +64,7 @@ async def import_emails(req: ImportEmailsRequest) -> dict:
     return {"success": True, "data": result}
 
 
-@router.post("/start")
+@router.post("/start", summary="启动批量注册", description="使用待处理邮箱启动批量注册任务。可指定注册数量（0=全部）。返回 task_id 供后续查询。")
 async def start_register(req: StartRegisterRequest, background_tasks: BackgroundTasks) -> dict:
     config = _load_config()
     engine = get_engine(config)
@@ -95,7 +106,7 @@ async def start_register(req: StartRegisterRequest, background_tasks: Background
     return {"success": True, "task_id": task_id, "total": len(emails)}
 
 
-@router.post("/control")
+@router.post("/control", summary="控制注册任务", description="暂停/恢复/停止正在运行的批量注册任务。")
 async def control_register(req: RegisterControlRequest) -> dict:
     config = _load_config()
     engine = get_engine(config)
@@ -110,7 +121,8 @@ async def control_register(req: RegisterControlRequest) -> dict:
     return {"success": True, "action": req.action, "is_running": engine.is_running, "is_paused": engine.is_paused}
 
 
-@router.get("/status")
+@router.get("/status", summary="注册任务状态", response_model=RegisterStatusResponse,
+            description="查询当前注册任务运行状态、统计数据、代理数量和最近任务。")
 async def register_status() -> dict:
     config = _load_config()
     engine = get_engine(config)
@@ -124,17 +136,38 @@ async def register_status() -> dict:
     }
 
 
-@router.get("/accounts")
-async def list_accounts(status: str = "", limit: int = 100, offset: int = 0, search: str = "") -> dict:
+@router.get("/accounts", summary="查询账号列表", response_model=AccountListResponse,
+            description="分页查询注册成功的账号列表，支持按状态和失败类型筛选，支持邮箱搜索。")
+async def list_accounts(status: str = "", limit: int = 100, offset: int = 0, search: str = "",
+                        failure_type: str = "") -> dict:
     # v3.1 审计：limit 收敛安全范围（0/负数→默认 100，上限 500），offset 防负
     limit = min(limit, 500) if limit > 0 else 100
     offset = max(0, offset)
-    accounts = get_accounts(status=status, limit=limit, offset=offset, search=search)
-    total = count_accounts(status=status, search=search)  # COUNT 查询，避免全表装载
+    accounts = get_accounts(status=status, limit=limit, offset=offset, search=search,
+                            failure_type=failure_type)
+    total = count_accounts(status=status, search=search, failure_type=failure_type)  # COUNT 查询，避免全表装载
     return {"accounts": accounts, "total": total}
 
 
-@router.get("/accounts/export")
+@router.post("/retry-failed", summary="重试失败账号",
+            description="把 failed/cf_blocked 账号对应的邮箱回置为 pending，使其可被 /start 重新注册。可选 failure_type 定向重试。")
+async def retry_failed(req: RetryFailedRequest) -> dict:
+    """把 failed/cf_blocked 账号对应的邮箱回置为 pending，使其可被 /start 重新注册（v3.4 失败重试闭环）。
+
+    可选 failure_type 定向重试某类失败子集（前端点失败分类徽章时带上）。
+    回置 emails.status 的同时清空 accounts.failure_type，确保诊断分类准确。
+    """
+    config = _load_config()
+    engine = get_engine(config)
+    if engine.is_running:
+        raise HTTPException(400, "注册任务运行中，请先停止后再重试")
+    n = requeue_failed_emails(failure_type=req.failure_type.strip())
+    add_log("info", f"重试失败账号：{n} 个邮箱已回置为待注册"
+            + (f"（类型: {req.failure_type}）" if req.failure_type else ""))
+    return {"success": True, "requeued": n, "failure_type": req.failure_type}
+
+
+@router.get("/accounts/export", summary="导出 Token 清单", description="导出所有成功账号的 access_token 列表，供外部系统直接使用。")
 async def export_accounts() -> dict:
     accounts = get_accounts(status="success")
     tokens = [acc["access_token"] for acc in accounts if acc.get("access_token")]
@@ -167,7 +200,8 @@ def _backup_before_clear(conn) -> Path | None:
     return path
 
 
-@router.post("/clear")
+@router.post("/clear", summary="清空注册数据", response_model=ClearResponse,
+            description="一键清空注册库（注册记录/邮箱池/任务）。需 confirm='clear' 确认，清空前自动备份。")
 async def clear_data(req: ClearRequest) -> dict:
     """一键清空注册库（注册记录/邮箱池/任务）。需 confirm='clear'，清空前自动备份。"""
     if req.confirm != "clear":
@@ -364,7 +398,8 @@ def _get_chatgpt2api_admin_key() -> str:
     return key
 
 
-@router.post("/export-accounts")
+@router.post("/export-accounts", summary="导出账号（chatgpt2api 格式）",
+            description="一键导出所有成功账号，并发刷新 OAuth token 后组装为 chatgpt2api 兼容格式。")
 async def export_accounts_chatgpt2api() -> dict:
     """一键导出所有成功账号（并发刷新 token 后，chatgpt2api 格式）。"""
     try:
@@ -376,7 +411,8 @@ async def export_accounts_chatgpt2api() -> dict:
     return {"success": True, "accounts": accounts, "total": len(accounts)}
 
 
-@router.post("/export-credentials")
+@router.post("/export-credentials", summary="导出账号密码清单",
+            description="一键导出所有账号密码清单（按邮箱去重）。格式: 邮箱----密码，每行一个。")
 async def export_credentials() -> dict:
     """一键导出所有账号密码清单（按邮箱去重）。格式: 邮箱----密码，每行一个。"""
     all_accounts = get_accounts()
@@ -406,7 +442,8 @@ async def export_credentials() -> dict:
     return {"success": True, "accounts": accounts, "total": len(accounts), "text": text}
 
 
-@router.post("/push-chatgpt2api")
+@router.post("/push-chatgpt2api", summary="推送账号到 chatgpt2api",
+            description="把成功账号（含 refresh_token）推送导入到 chatgpt2api 账号池，自动去重 + 自动刷新。")
 async def push_chatgpt2api() -> dict:
     """把成功账号（含 refresh_token）推送导入到 chatgpt2api 账号池，自动去重 + 自动刷新。"""
     config = _load_config()
@@ -448,7 +485,8 @@ async def push_chatgpt2api() -> dict:
         return {"success": False, "error": str(e), "pushed": 0}
 
 
-@router.post("/replenish-tokens")
+@router.post("/replenish-tokens", summary="一键补齐 Token",
+            description="为「有 openai_refresh_token 但缺有效 access_token」的账号刷新补齐 Token。")
 async def replenish_tokens() -> dict:
     """一键补齐 Token：为「有 openai_refresh_token 但缺有效 access_token」的账号刷新补齐。
 

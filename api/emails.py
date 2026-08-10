@@ -3,6 +3,8 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from api.models import EmailListResponse, ClearResponse, ApiResponse
+
 from services.db import (
     count_emails,
     db_session,

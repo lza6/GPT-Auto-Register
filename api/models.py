@@ -48,7 +48,7 @@ class EmailListResponse(BaseModel):
 class ClearResponse(BaseModel):
     """清空操作响应。"""
     success: bool
-    deleted: Optional[dict] = None
+    deleted: Optional[Any] = None
     backup: Optional[str] = None
 
 
