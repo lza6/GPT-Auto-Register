@@ -37,7 +37,9 @@ class TestAuthMiddleware:
         assert js.status_code == 200
         assert css.status_code == 200
         assert "loadTokenHealth" in js.text  # T2 已接入
-        assert "checkProxyHealth" in js.text  # T3 已接入
+        reg_js = client.get("/register.js")
+        assert reg_js.status_code == 200
+        assert "checkProxyHealth" in reg_js.text  # T3 已接入（拆分后位于 register.js）
         assert "</style>" not in css.text  # 拆分残留已清理
 
     def test_sensitive_endpoint_requires_key(self, client):

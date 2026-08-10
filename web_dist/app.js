@@ -25,3 +25,7 @@ if (tabEl) {
     switchTab('accounts', defaultTab);
   }
 }
+
+// ── i18n ──
+import { renderLangSelector } from "./i18n.js";
+renderLangSelector();
