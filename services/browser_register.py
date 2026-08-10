@@ -8,6 +8,7 @@ import secrets
 import string
 import time
 import uuid
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse
 
@@ -31,6 +32,34 @@ from services.browser_selectors import (
     SUBMIT_PRIMARY,
     SWITCH_OTP_SELECTORS,
 )
+
+# B7：debug 截图目录，自动创建
+_DEBUG_DIR = Path(__file__).resolve().parent.parent / "data" / "debug"
+
+
+def _ensure_debug_dir() -> None:
+    _DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+async def _capture_debug(page, email: str, tag: str = "") -> str:
+    """截取 full_page 截图 + DOM 快照，保存到 data/debug/，返回截图路径（相对 data/）。"""
+    _ensure_debug_dir()
+    prefix = email.split("@")[0] if email else "unknown"
+    ts = int(time.time())
+    safename = "".join(c for c in prefix if c.isalnum() or c in "._-")[:30]
+    try:
+        shot_path = f"debug/{safename}_{tag}_{ts}.png"
+        await page.screenshot(
+            path=str(_DEBUG_DIR.parent / shot_path),
+            full_page=True,
+        )
+        # DOM 快照
+        dom_path = f"debug/{safename}_{tag}_{ts}.html"
+        dom = await page.content()
+        (_DEBUG_DIR.parent / dom_path).write_text(dom, encoding="utf-8")
+        return shot_path
+    except Exception:
+        return ""
 
 # OAuth PKCE 常量：收敛到 services/constants.py（B5），此处保留别名供旧 import 向后兼容
 from services.constants import (
@@ -149,8 +178,9 @@ class BrowserRegister:
         return False
 
     async def _resolve_cf(self, page, email: str, max_attempts: int = 3) -> bool:
-        """尝试自动解 Cloudflare 挑战（点复选框 + 等待重检），返回是否脱离挑战。"""
+        """尝试自动解 Cloudflare 挑战（点复选框 + 调 CF solver 拿 token 兜底）。"""
         from services.login_detector import is_cf_challenge
+        from services.cf_solver_service import cf_solver_service
 
         for attempt in range(max_attempts):
             clicked = await self._try_click_turnstile(page)
@@ -159,6 +189,30 @@ class BrowserRegister:
                 await asyncio.sleep(4)
             if not is_cf_challenge(page.url, await self._page_html(page)):
                 return True
+            # v3.4 T87：复选框解不开时调 CF solver 拿 Turnstile token
+            if not clicked:
+                try:
+                    sitekey = await page.evaluate(
+                        """() => {
+                            const el = document.querySelector('[data-sitekey]');
+                            return el ? el.getAttribute('data-sitekey') : '';
+                        }"""
+                    )
+                    if sitekey:
+                        add_log("info", f"[{email}] 调用 CF solver 解 Turnstile (sitekey={sitekey[:8]}...)")
+                        solver_result = await cf_solver_service.get_turnstile_token(page.url, sitekey, timeout=60)
+                        if solver_result.get("status") == "success" and solver_result.get("value"):
+                            token = solver_result["value"]
+                            await page.evaluate(f"""() => {{
+                                const el = document.querySelector('[name="cf-turnstile-response"]');
+                                if (el) el.value = '{token}';
+                            }}""")
+                            await asyncio.sleep(3)
+                            if not is_cf_challenge(page.url, await self._page_html(page)):
+                                add_log("info", f"[{email}] CF solver 成功解 Turnstile")
+                                return True
+                except Exception as e:
+                    add_log("warning", f"[{email}] CF solver 调用异常: {e}")
             await asyncio.sleep(3)
         return False
 
@@ -170,6 +224,7 @@ class BrowserRegister:
             "access_token": "", "refresh_token": "", "id_token": "",
             "openai_password": "",
             "name": "", "birthdate": "", "proxy": "",
+            "screenshot": "",
         }
         name = name_service.generate()
         birthdate = name_service.generate_birthdate()
@@ -215,6 +270,7 @@ class BrowserRegister:
         try:
             from camoufox.async_api import AsyncCamoufox
             from camoufox import DefaultAddons
+            from browserforge.fingerprints import Screen  # 屏幕尺寸约束
         except ImportError:
             result["error"] = "camoufox 未安装"
             add_log("error", f"[{email}] camoufox 未安装")
@@ -239,6 +295,13 @@ class BrowserRegister:
                         headless=True,
                         exclude_addons=[DefaultAddons.UBO],
                         args=["--no-sandbox", "--disable-setuid-sandbox"],
+                        # v3.4 T86：浏览器指纹一致性——伪装为美国 Windows 系统，防 American IP + 中文时区被地理校验标记
+                        os=["windows", "macos"],
+                        screen=Screen(max_width=1920, max_height=1080),
+                        locale="en-US",
+                        block_webrtc=True,
+                        disable_coop=True,
+                        humanize=1.5,
                     )
                     pooled_inst.browser = await pooled_inst.camoufox.start()
                     add_log("info", f"[{email}] 浏览器池：新实例已启动并入池")
@@ -252,6 +315,13 @@ class BrowserRegister:
                     headless=True,
                     exclude_addons=[DefaultAddons.UBO],
                     args=["--no-sandbox", "--disable-setuid-sandbox"],
+                    # v3.4 T86：浏览器指纹一致性——伪装为美国 Windows 系统，防 American IP + 中文时区被地理校验标记
+                    os=["windows", "macos"],
+                    screen=Screen(max_width=1920, max_height=1080),
+                    locale="en-US",
+                    block_webrtc=True,
+                    disable_coop=True,
+                    humanize=1.5,
                 )
                 browser = await camoufox.start()
 
@@ -270,6 +340,41 @@ class BrowserRegister:
                         }
                     else:
                         context_kwargs["proxy"] = {"server": server}
+
+            # v3.4 T86：浏览器地理/时区一致性——使 Intl API 时区与 kookeey 出口 IP 一致
+            # camoufox 的 geoip 基于启动时公共 IP，per-context 代理下可能取宿主 IP 而非代理出口 IP，
+            # 稳妥从 kookeey 行的 country 字段显式映射 timezone/locale 到 new_context。
+            # 覆盖 kookeey 支持的 40+ 国家（v3.4 补全：此前仅 14 国，其余回退到 US 时区）
+            _country_to_timezone = {
+                # 北美
+                "US": "America/New_York", "CA": "America/Toronto", "MX": "America/Mexico_City",
+                # 欧洲
+                "GB": "Europe/London", "DE": "Europe/Berlin", "FR": "Europe/Paris",
+                "IT": "Europe/Rome", "ES": "Europe/Madrid", "NL": "Europe/Amsterdam",
+                "BE": "Europe/Brussels", "CH": "Europe/Zurich", "SE": "Europe/Stockholm",
+                "NO": "Europe/Oslo", "DK": "Europe/Copenhagen", "FI": "Europe/Helsinki",
+                "PL": "Europe/Warsaw", "AT": "Europe/Vienna", "IE": "Europe/Dublin",
+                "PT": "Europe/Lisbon", "GR": "Europe/Athens", "CZ": "Europe/Prague",
+                "RO": "Europe/Bucharest", "HU": "Europe/Budapest", "UA": "Europe/Kyiv",
+                "RU": "Europe/Moscow", "TR": "Europe/Istanbul",
+                # 亚太
+                "JP": "Asia/Tokyo", "SG": "Asia/Singapore", "HK": "Asia/Hong_Kong",
+                "TW": "Asia/Taipei", "KR": "Asia/Seoul", "CN": "Asia/Shanghai",
+                "AU": "Australia/Sydney", "NZ": "Pacific/Auckland", "IN": "Asia/Kolkata",
+                "TH": "Asia/Bangkok", "MY": "Asia/Kuala_Lumpur", "PH": "Asia/Manila",
+                "ID": "Asia/Jakarta", "VN": "Asia/Ho_Chi_Minh", "PK": "Asia/Karachi",
+                "BD": "Asia/Dhaka", "IL": "Asia/Jerusalem", "SA": "Asia/Riyadh",
+                "AE": "Asia/Dubai",
+                # 南美
+                "BR": "America/Sao_Paulo", "AR": "America/Argentina/Buenos_Aires",
+                "CL": "America/Santiago", "CO": "America/Bogota", "PE": "America/Lima",
+                # 中东 / 非洲
+                "ZA": "Africa/Johannesburg", "NG": "Africa/Lagos", "KE": "Africa/Nairobi",
+                "EG": "Africa/Cairo",
+            }
+            proxy_country = proxy_service.country if hasattr(proxy_service, 'country') else "US"
+            context_kwargs["locale"] = "en-US"
+            context_kwargs["timezone_id"] = _country_to_timezone.get(proxy_country, "America/New_York")
 
             context = await browser.new_context(**context_kwargs)
             page = await context.new_page()
@@ -343,6 +448,7 @@ class BrowserRegister:
                 if not cf_resolved:
                     result["status"] = "cf_blocked"
                     result["error"] = "Cloudflare 人机验证无法自动通过"
+                    result["screenshot"] = await _capture_debug(page, email, "cf_blocked")
                     add_log("warning", f"[{email}] CF 挑战未通过 (尝试 {cf_attempts + 1} 次)")
                     return result
                 inputs = await self._collect_page_inputs(page)
@@ -353,7 +459,7 @@ class BrowserRegister:
             # 无法识别：附带页面文字摘要，便于快速适配上游改版
             if action == "fail":
                 body_text = summarize_page_text(await self._page_body_text(page))
-                await page.screenshot(path=f"debug_unknown_{email.split('@')[0]}.png")
+                result["screenshot"] = await _capture_debug(page, email, "unknown_page")
                 result["error"] = f"无法识别登录页: {page.url[:80]}"
                 add_log("error", f"[{email}] 无法识别登录页，页面文字: {body_text[:200]}")
                 return result
@@ -372,6 +478,7 @@ class BrowserRegister:
                     except Exception:
                         continue
                 if not clicked:
+                    result["screenshot"] = await _capture_debug(page, email, "switch_otp_fail")
                     result["error"] = "密码登录页但无法切换到邮箱验证码登录"
                     add_log("error", f"[{email}] {result['error']}")
                     return result
@@ -447,7 +554,7 @@ class BrowserRegister:
                     try:
                         await email_input.wait_for(state="visible", timeout=8000)
                     except Exception:
-                        await page.screenshot(path=f"debug_login_{email.split('@')[0]}.png")
+                        result["screenshot"] = await _capture_debug(page, email, "email_not_visible")
                         result["error"] = "邮箱输入框不可见"
                         add_log("error", f"[{email}] 邮箱输入框不可见，已截图")
                         return result
@@ -510,6 +617,7 @@ class BrowserRegister:
                             except Exception as e2:
                                 add_log("warning", f"[{email}] 重试提交异常: {e2}")
                         else:
+                            result["screenshot"] = await _capture_debug(page, email, "page_jump_fail")
                             result["error"] = f"页面跳转异常: {current_url[:80]}"
                             return result
 
@@ -526,6 +634,7 @@ class BrowserRegister:
                     skip_code=old_codes.pop() if old_codes else "",
                 )
                 if not otp_code:
+                    result["screenshot"] = await _capture_debug(page, email, "otp_timeout")
                     result["error"] = "验证码等待超时"
                     add_log("error", f"[{email}] {result['error']}")
                     return result
@@ -572,6 +681,7 @@ class BrowserRegister:
                     await asyncio.sleep(2)
                     current_url = page.url
                     if "about-you" not in current_url:
+                        result["screenshot"] = await _capture_debug(page, email, "aboutyou_jump_fail")
                         result["error"] = f"验证码提交后跳转异常: {current_url[:80]}"
                         return result
 
@@ -589,10 +699,10 @@ class BrowserRegister:
                 try:
                     await name_input.wait_for(state="visible", timeout=5000)
                 except Exception:
-                    await page.screenshot(path=f"debug_aboutyou_{email.split('@')[0]}.png")
-                    result["error"] = "姓名输入框不可见"
-                    add_log("error", f"[{email}] 姓名输入框不可见，已截图")
-                    return result
+                        result["screenshot"] = await _capture_debug(page, email, "name_not_visible")
+                        result["error"] = "姓名输入框不可见"
+                        add_log("error", f"[{email}] 姓名输入框不可见，已截图")
+                        return result
 
             await name_input.click()
             await name_input.fill("")
@@ -711,6 +821,7 @@ class BrowserRegister:
             pooled_ok = True  # 正常完成：实例健康，可归还池复用
 
         except Exception as e:
+            result["screenshot"] = await _capture_debug(page, email, "exception") if 'page' in dir() and page else ""
             result["error"] = f"浏览器注册异常: {e}"
             add_log("error", f"[{email}] 异常: {e}")
         finally:

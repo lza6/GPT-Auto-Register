@@ -50,8 +50,8 @@ class CFSolverService:
             self._process = subprocess.Popen(
                 [sys.executable, str(wrapper)],
                 cwd=str(CF_SOLVER_DIR),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=open(str(CF_SOLVER_DIR.parent / "data" / "logs" / "cf_solver.log"), "a", encoding="utf-8"),
+                stderr=subprocess.STDOUT,
             )
             # 等待服务就绪
             for i in range(30):
@@ -67,12 +67,44 @@ class CFSolverService:
             return False
 
     async def stop(self) -> None:
-        """停止 CF solver 服务"""
+        """停止 CF solver 服务（v3.4 T96：先 HTTP 调优雅退出端点再 terminate，超时 kill 树杀）。"""
+        import psutil
         if self._process and self._process.poll() is None:
+            pid = self._process.pid
+            # 先尝试 HTTP 优雅退出
+            try:
+                async with httpx.AsyncClient(timeout=3) as client:
+                    await client.post(f"{CF_SOLVER_URL}/shutdown")
+            except Exception:
+                pass
             self._process.terminate()
-            self._process.wait(timeout=10)
+            try:
+                self._process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                # 超时未被杀死 → 树杀（含 camoufox 子进程）
+                try:
+                    parent = psutil.Process(pid)
+                    children = parent.children(recursive=True)
+                    for child in children:
+                        try:
+                            child.kill()
+                        except Exception:
+                            pass
+                    parent.kill()
+                except Exception:
+                    pass
             self._running = False
             add_log("info", "CF solver 已停止")
+        # 按进程名兜底清理残留 camoufox
+        try:
+            for proc in psutil.process_iter(['pid', 'name']):
+                try:
+                    if proc.info.get('name') and 'camoufox' in proc.info['name'].lower():
+                        proc.kill()
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     async def _check_health(self) -> bool:
         """检查 CF solver 健康状态"""

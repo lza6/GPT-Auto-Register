@@ -40,6 +40,8 @@ class TokenRefresher:
         self._running = False
         self._last_scan_at: float = 0
         self._last_result: dict[str, int] = {"scanned": 0, "refreshed": 0, "failed": 0}
+        self._scanning = False  # v3.4 T84：防重入哨兵（扫描慢于 interval 时不叠加）
+        self._consecutive_errors = 0  # v3.4 T84：连续异常计数，驱动退避重启
 
     @property
     def is_running(self) -> bool:
@@ -59,7 +61,32 @@ class TokenRefresher:
             return
         self._running = True
         self._task = asyncio.create_task(self._run_loop())
+        # v3.4 T84：崩溃自愈——任务异常退出（非主动 stop）时自动重启（带退避，防异常风暴刷日志）
+        self._task.add_done_callback(self._on_task_done)
         add_log("info", f"token 巡检任务已启动，间隔 {self._interval}s")
+
+    def _on_task_done(self, task: asyncio.Task) -> None:
+        """巡检任务结束回调：主动 stop 则静默；异常退出且仍 _running 则退避后自动重启。"""
+        if not self._running:
+            return  # 主动 stop，不重启
+        exc = task.exception() if not task.cancelled() else None
+        if exc is None:
+            return  # 正常结束（理论上 _run_loop 不会正常退出，除非 _running=False）
+        self._consecutive_errors += 1
+        backoff = min(300, 5 * (2 ** min(self._consecutive_errors - 1, 6)))  # 5s→10s→…→300s 封顶
+        add_log("error", f"token 巡检任务异常退出（{type(exc).__name__}: {exc}），{backoff}s 后自动重启（第 {self._consecutive_errors} 次）")
+        try:
+            loop = asyncio.get_running_loop()
+            loop.call_later(backoff, self._restart)
+        except RuntimeError:
+            pass  # 事件循环已关闭
+
+    def _restart(self) -> None:
+        """重启巡检任务（由 _on_task_done 退避后触发）。"""
+        if not self._running:
+            return
+        self._task = None
+        self.start()
 
     async def stop(self) -> None:
         """停止巡检任务。"""
@@ -74,57 +101,75 @@ class TokenRefresher:
         add_log("info", "token 巡检任务已停止")
 
     async def _run_loop(self) -> None:
-        """主循环：周期扫描，异常不退出。"""
+        """主循环：周期扫描，异常不退出（v3.4：防重入 + 退避，崩溃由 _on_task_done 兜底重启）。"""
         # 启动后等 60s 再首次扫描，避免与启动并发
         await asyncio.sleep(60)
         while self._running:
+            started_at = time.time()
             try:
                 await self._scan_once()
+                self._consecutive_errors = 0  # 成功一轮，清零退避计数
+            except asyncio.CancelledError:
+                raise  # 主动 stop，上抛退出循环
             except Exception as e:
                 add_log("error", f"token 巡检异常: {e}")
+            # 防重入：本轮耗时从 interval 里扣除，扫描慢时自然顺延而非叠加
+            elapsed = time.time() - started_at
+            wait = max(5, self._interval - elapsed)
             # 分段 sleep，便于 stop 及时响应
-            slept = 0
-            while self._running and slept < self._interval:
-                await asyncio.sleep(5)
-                slept += 5
+            slept = 0.0
+            while self._running and slept < wait:
+                step = min(5.0, wait - slept)
+                await asyncio.sleep(step)
+                slept += step
 
     async def _scan_once(self) -> dict[str, int]:
-        """扫描所有 success 账号，刷新过期 token。"""
-        # 取所有有 refresh_token 的 success 账号
-        with db_session() as conn:
-            rows = conn.execute(
-                "SELECT email, openai_refresh_token FROM accounts "
-                "WHERE status = 'success' AND openai_refresh_token != ''"
-            ).fetchall()
-        accounts = [dict(r) for r in rows]
-        self._last_result = {"scanned": len(accounts), "refreshed": 0, "failed": 0}
-        self._last_scan_at = time.time()
-
-        if not accounts:
-            add_log("info", "token 巡检：无 success 账号可扫描")
+        """扫描所有 success 账号，刷新过期 token（v3.4：防重入 + 局部统计消除并发读写共享 dict）。"""
+        if self._scanning:
+            add_log("warning", "token 巡检上一轮未结束，跳过本轮（防重入）")
             return self._last_result
+        self._scanning = True
+        try:
+            # 取所有有 refresh_token 的 success 账号
+            with db_session() as conn:
+                rows = conn.execute(
+                    "SELECT email, openai_refresh_token FROM accounts "
+                    "WHERE status = 'success' AND openai_refresh_token != ''"
+                ).fetchall()
+            accounts = [dict(r) for r in rows]
+            self._last_scan_at = time.time()
+            # v3.4：用局部 dict 统计，gather 结束一次性赋值，消除并发 += 共享 _last_result 的竞态
+            result = {"scanned": len(accounts), "refreshed": 0, "failed": 0}
 
-        sem = asyncio.Semaphore(self._concurrency)
+            if not accounts:
+                add_log("info", "token 巡检：无 success 账号可扫描")
+                self._last_result = result
+                return result
 
-        async def refresh_one(acc: dict) -> None:
-            async with sem:
-                try:
-                    tokens = await self._refresh_token(acc["openai_refresh_token"])
-                    if tokens and tokens.get("access_token"):
-                        # 同时落库新 access_token 与轮换后的新 refresh_token（否则库存 RT 会逐步耗尽）
-                        self._update_tokens(acc["email"], tokens["access_token"], tokens.get("refresh_token", ""))
-                        self._last_result["refreshed"] += 1
-                    else:
-                        self._last_result["failed"] += 1
-                except Exception as e:
-                    add_log("warning", f"token 巡检 [{acc['email']}] 异常: {e}")
-                    self._last_result["failed"] += 1
+            sem = asyncio.Semaphore(self._concurrency)
 
-        await asyncio.gather(*(refresh_one(a) for a in accounts))
-        add_log("info",
-                f"token 巡检完成：扫描 {self._last_result['scanned']}，"
-                f"刷新 {self._last_result['refreshed']}，失败 {self._last_result['failed']}")
-        return self._last_result
+            async def refresh_one(acc: dict) -> None:
+                async with sem:
+                    try:
+                        tokens = await self._refresh_token(acc["openai_refresh_token"])
+                        if tokens and tokens.get("access_token"):
+                            # 同时落库新 access_token 与轮换后的新 refresh_token（否则库存 RT 会逐步耗尽）
+                            self._update_tokens(acc["email"], tokens["access_token"], tokens.get("refresh_token", ""))
+                            result["refreshed"] += 1
+                        else:
+                            result["failed"] += 1
+                    except Exception as e:
+                        add_log("warning", f"token 巡检 [{acc['email']}] 异常: {e}")
+                        result["failed"] += 1
+
+            await asyncio.gather(*(refresh_one(a) for a in accounts))
+            self._last_result = result
+            add_log("info",
+                    f"token 巡检完成：扫描 {result['scanned']}，"
+                    f"刷新 {result['refreshed']}，失败 {result['failed']}")
+            return result
+        finally:
+            self._scanning = False
 
     def _resolve_proxy(self) -> str | None:
         """解析代理：优先 config.proxy_url，其次代理池（use_proxy 时）。与注册链路一致。

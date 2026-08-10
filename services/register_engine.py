@@ -8,6 +8,7 @@ from typing import Any
 
 from services.db import add_log, insert_account, mark_email_status, get_accounts, update_task_progress, get_task
 from services.db import mark_platform_usage
+from services.metrics import register_total, register_duration, engine_running, engine_queue_depth
 
 
 def _as_bool(value, default: bool = True) -> bool:
@@ -148,6 +149,8 @@ class RegisterEngine:
         self._running = True
         self._paused = False
         self._starting = False
+        engine_running.set(1)
+        engine_queue_depth.set(len(emails))
         was_stopped = self._stop_requested
         self._stop_requested = False
         if was_stopped:
@@ -163,6 +166,14 @@ class RegisterEngine:
         self._pause_event = asyncio.Event()
         self._pause_event.set()
         concurrency = max(1, _as_int(self.config.get("register_concurrency"), 1))
+        # B13：从任务结果恢复上次处理位置，已完成索引不再重复执行。
+        last_processed_index = -1
+        task = get_task(task_id)
+        if task and task.get("result"):
+            try:
+                last_processed_index = int(json.loads(task["result"]).get("last_processed_index", -1))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                pass
         stats: dict[str, Any] = {
             "total": len(emails), "completed": 0, "failed": 0, "skipped": 0,
             "failure_types": {},
@@ -181,6 +192,9 @@ class RegisterEngine:
         auto_resume_task = {"handle": None}
 
         async def process_one(i: int, mail: dict[str, str]) -> None:
+            # B13：断点续跑时跳过已精确记录的处理索引。
+            if i <= last_processed_index:
+                return
             email = mail["email"]
             async with sem:
                 # 暂停等待 + 停止检查（放在 sem 内：已排队但未开始的槽位也会被 pause/stop 拦下）
@@ -196,10 +210,16 @@ class RegisterEngine:
                     async with stats_lock:
                         stats["skipped"] += 1
                         mark_email_status(email, "used")
-                        update_task_progress(task_id, stats["completed"], stats["failed"], stats["skipped"])
+                        stats["last_processed_email"] = email
+                        stats["last_processed_index"] = i
+                        update_task_progress(
+                            task_id, stats["completed"], stats["failed"], stats["skipped"],
+                            result=json.dumps(stats, ensure_ascii=False),
+                        )
                     return
 
                 try:
+                    _start_time = time.time()
                     result = await self.register_one(
                         email=email,
                         password=mail["password"],
@@ -218,7 +238,12 @@ class RegisterEngine:
                             proxy=self.config.get("proxy_url") or "直连",
                             status="failed", error=f"注册异常: {exc}",
                         )
-                        update_task_progress(task_id, stats["completed"], stats["failed"], stats["skipped"])
+                        stats["last_processed_email"] = email
+                        stats["last_processed_index"] = i
+                        update_task_progress(
+                            task_id, stats["completed"], stats["failed"], stats["skipped"],
+                            result=json.dumps(stats, ensure_ascii=False),
+                        )
                     return
 
                 async with stats_lock:
@@ -276,7 +301,24 @@ class RegisterEngine:
                             proxy=result["proxy"], status="failed",
                             error=result["error"],
                         )
-                    update_task_progress(task_id, stats["completed"], stats["failed"], stats["skipped"])
+                    stats["last_processed_email"] = email
+                    stats["last_processed_index"] = i
+                    update_task_progress(
+                        task_id, stats["completed"], stats["failed"], stats["skipped"],
+                        result=json.dumps(stats, ensure_ascii=False),
+                    )
+
+                # B15: Prometheus 埋点
+                _duration = time.time() - _start_time
+                register_duration.observe(_duration)
+                if result["status"] == "success":
+                    register_total.labels(status="success").inc()
+                elif result["status"] == "success_no_token":
+                    register_total.labels(status="success_no_token").inc()
+                elif result["status"] == "cf_blocked":
+                    register_total.labels(status="cf_blocked").inc()
+                else:
+                    register_total.labels(status="failed").inc()
 
                 # v3.0 A4A6：失败分级驱动自适应
                 # 仅在 failed 分支后检查（result["status"]=="failed"）
@@ -333,6 +375,8 @@ class RegisterEngine:
             # 后续 /start 永远被「已在运行中」拒绝（v3.1 审计修复）
             self._running = False
             self._starting = False
+            engine_running.set(0)
+            engine_queue_depth.set(0)
 
         task_status = "stopped" if stopped["flag"] else "completed"
         update_task_progress(

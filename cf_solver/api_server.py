@@ -1133,7 +1133,7 @@ CONFIG_DEFAULTS = {
     "page_count":    1,
     "proxy_support": False,
     "proxy_file":    "proxies.txt",
-    "host":          "0.0.0.0",
+    "host":          "127.0.0.1",
     "port":          8001,   # port berbeda dari api_server.py agar bisa jalan bersamaan
     "debug":         False,
     "cleanup_interval_minutes": 10,  # interval cleanup paksa (menit)

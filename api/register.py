@@ -12,7 +12,7 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 
 from services.db import (
-    add_log, get_pending_emails, get_accounts, get_stats,
+    add_log, get_pending_emails, get_accounts, get_stats, get_task_history,
     get_conn, get_latest_task, db_session, count_accounts, requeue_failed_emails,
 )
 from services.register_engine import get_engine
@@ -483,6 +483,12 @@ async def push_chatgpt2api() -> dict:
     except Exception as e:
         add_log("error", f"推送 chatgpt2api 失败: {e}")
         return {"success": False, "error": str(e), "pushed": 0}
+
+
+@router.get("/task-history", summary="任务历史",
+            description="获取最近 N 条任务历史记录。")
+async def task_history() -> dict:
+    return {"history": get_task_history(limit=50)}
 
 
 @router.post("/replenish-tokens", summary="一键补齐 Token",

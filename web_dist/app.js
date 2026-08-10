@@ -11,9 +11,40 @@ let emSearchTimer = null;
 const ACC_PAGE_SIZE = 50;
 const EM_PAGE_SIZE = 50;
 
+// v3.4 B10: localStorage 持久化
+function saveState() {
+  try {
+    const state = {
+      activeTab: document.querySelector('.tab.active')?.textContent?.trim()?.toLowerCase()?.replace(/[^\w]/g, '') || 'accounts',
+      accSearch: document.getElementById('accSearch')?.value || '',
+      emSearch: document.getElementById('emSearch')?.value || '',
+      accStatus: document.getElementById('accStatus')?.value || '',
+      emStatus: document.getElementById('emStatus')?.value || '',
+      accPage: accPage,
+      emPage: emPage,
+    };
+    localStorage.setItem('gpt-reg-ui-state', JSON.stringify(state));
+  } catch (e) { /* ignore */ }
+}
+
+function loadState() {
+  try {
+    const raw = localStorage.getItem('gpt-reg-ui-state');
+    if (!raw) return;
+    const state = JSON.parse(raw);
+    if (state.accSearch !== undefined) document.getElementById('accSearch').value = state.accSearch;
+    if (state.emSearch !== undefined) document.getElementById('emSearch').value = state.emSearch;
+    if (state.accStatus !== undefined) document.getElementById('accStatus').value = state.accStatus;
+    if (state.emStatus !== undefined) document.getElementById('emStatus').value = state.emStatus;
+    if (state.accPage !== undefined) accPage = state.accPage;
+    if (state.emPage !== undefined) emPage = state.emPage;
+    return state.activeTab || 'accounts';
+  } catch (e) { return 'accounts'; }
+}
+
 // 搜索防抖：避免每敲一个字符就发一次请求
-function onAccSearch() { accPage = 0; clearTimeout(accSearchTimer); accSearchTimer = setTimeout(() => loadAccounts(), 300); }
-function onEmSearch() { emPage = 0; clearTimeout(emSearchTimer); emSearchTimer = setTimeout(() => loadEmails(), 300); }
+function onAccSearch() { accPage = 0; saveState(); clearTimeout(accSearchTimer); accSearchTimer = setTimeout(() => loadAccounts(), 300); }
+function onEmSearch() { emPage = 0; saveState(); clearTimeout(emSearchTimer); emSearchTimer = setTimeout(() => loadEmails(), 300); }
 
 function escapeHtml(s) {
   if (s === null || s === undefined) return '';
@@ -70,6 +101,27 @@ function toast(msg) {
   t.style.display = 'block';
   clearTimeout(t._timer);
   t._timer = setTimeout(() => t.style.display = 'none', 2500);
+}
+
+// v3.4 T89：三态 toast（info/success/error），error 红色更久可关闭
+function toastMsg(msg, level = 'info') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'toast toast-' + level;
+  t.style.display = 'block';
+  clearTimeout(t._timer);
+  const duration = level === 'error' ? 5000 : 2500;
+  t._timer = setTimeout(() => { t.style.display = 'none'; t.className = 'toast'; }, duration);
+}
+
+// v3.4 T89：withBusy 防连点封装
+async function withBusy(btn, busyText, fn) {
+  if (!btn) return fn();
+  if (btn.disabled) return;
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = busyText;
+  try { return await fn(); }
+  finally { btn.disabled = false; btn.textContent = orig; }
 }
 
 async function copyText(text) {
@@ -135,11 +187,34 @@ function updateTask(task) {
     : task.status === 'interrupted' ? '已中断'
     : task.status === 'stopped' ? '已停止'
     : (task.status || '');
-  text.textContent = `${statusText} · ${done}/${task.total}（成功 ${task.completed||0} · 失败 ${task.failed||0} · 跳过 ${task.skipped||0}）`;
+  // v3.4 T94：速率/ETA——前端本地算，零后端改动
+  const now = Date.now();
+  if (!window._taskSnap) window._taskSnap = { done: 0, ts: now };
+  const snap = window._taskSnap;
+  const elapsed = (now - snap.ts) / 1000 / 60;  // 分钟
+  let rateText = '';
+  if (elapsed > 0.1 && done > snap.done) {
+    const rate = (done - snap.done) / elapsed;  // 条/分钟
+    const eta = rate > 0 ? Math.round((task.total - done) / rate) : 0;
+    rateText = ` · 速率 ${rate.toFixed(1)}条/分` + (eta > 0 ? ` · 预计剩余 ${eta}分钟` : '');
+    // 60s 无推进时进度条变红
+    if (now - snap.ts > 60000 && (done - snap.done) === 0) {
+      fill.style.background = 'var(--red)';
+    } else {
+      fill.style.background = '';
+    }
+  }
+  window._taskSnap = { done, ts: now };
+  text.textContent = `${statusText} · ${done}/${task.total}（成功 ${task.completed||0} · 失败 ${task.failed||0} · 跳过 ${task.skipped||0}）${rateText}`;
 }
 
 function updateStats(s) {
   if (!s) return;
+  // 移除骨架屏（数据首次加载后）
+  document.querySelectorAll('.stat-card .value.skeleton').forEach(el => {
+    el.classList.remove('skeleton');
+    el.style.width = ''; el.style.height = '';
+  });
   document.getElementById('sEmailsTotal').textContent = s.emails_total || 0;
   document.getElementById('sEmailsPending').textContent = s.emails_pending || 0;
   document.getElementById('sAccountsSuccess').textContent = s.accounts_success || 0;
@@ -159,6 +234,10 @@ function updateStats(s) {
       diag.innerHTML = '';
     }
   }
+  // v3.4 T94：转化漏斗（邮箱 → 已消耗 → 成功 → 有token）
+  updateFunnel(s);
+  // v3.4 T94：c2api 就绪率
+  updateReadiness();
 }
 
 // v3.1 T8：把失败原因分布渲染为分类徽章卡片 + 占比 + 引导语
@@ -173,6 +252,47 @@ function renderFailureDiagnosis(ft, hint) {
   }).join('');
   return `<div style="margin-bottom:6px"><b>失败分类</b>（共 ${total}） ${badges}</div>`
     + (hint ? `<div>${escapeHtml(hint)}</div>` : '');
+}
+
+// v3.4 T94：c2api 就绪率聚合
+async function updateReadiness() {
+  const grid = document.getElementById('readinessGrid');
+  const fullyReady = document.getElementById('sFullyReady');
+  if (!grid || !fullyReady) return;
+  try {
+    const d = await api('/stats/account-readiness');
+    if (d.total_success > 0) {
+      const pct = Math.round(d.fully_ready / d.total_success * 100);
+      fullyReady.textContent = `${d.fully_ready}/${d.total_success} (${pct}%)`;
+      grid.style.display = 'grid';
+    }
+  } catch (e) { /* 不阻断 */ }
+}
+
+// v3.4 T94：转化漏斗条（邮箱 → 已消耗 → 成功 → 有token）
+function updateFunnel(s) {
+  const bar = document.getElementById('funnelBar');
+  const seg = document.getElementById('funnelSegments');
+  if (!bar || !seg) return;
+  const total = s.emails_total || 0;
+  if (total === 0) { bar.style.display = 'none'; return; }
+  const used = (s.emails_total || 0) - (s.emails_pending || 0);
+  const success = s.accounts_success || 0;
+  const withToken = s.accounts_total || 0;
+  const segments = [
+    { label: '邮箱', val: total, color: 'var(--accent)' },
+    { label: '已消耗', val: used, color: 'var(--yellow)' },
+    { label: '成功', val: success, color: 'var(--green)' },
+    { label: '有token', val: withToken, color: 'var(--blue, #3b82f6)' },
+  ];
+  const maxVal = Math.max(total, 1);
+  seg.innerHTML = segments.map(seg => {
+    const pct = Math.round(seg.val / maxVal * 100);
+    const conv = total > 0 ? Math.round(seg.val / total * 100) + '%' : '';
+    return `<div style="flex:${pct};background:${seg.color};padding:4px 8px;border-radius:4px;text-align:center;color:#fff;min-width:60px;font-size:11px">
+      ${seg.label}<br><strong>${seg.val}</strong> ${conv}</div>`;
+  }).join('');
+  bar.style.display = 'block';
 }
 
 function copyFrom(el) {
@@ -227,7 +347,7 @@ async function importEmails() {
     closeModal();
     toast(`导入完成: 新增 ${data.data.inserted}, 跳过 ${data.data.skipped}`);
     refreshStatus();
-  } catch (e) { alert('导入失败: ' + e.message); }
+  } catch (e) { toastMsg('导入失败: ' + e.message, 'error'); }
   finally {
     if (btnModal) btnModal.disabled = false;
     btnHead.disabled = false; btnHead.textContent = '📥 导入邮箱';
@@ -258,7 +378,7 @@ function openManualAdd() {
 }
 async function submitManualAdd() {
   const text = document.getElementById('manualEmails').value;
-  if (!text.trim()) { alert('内容为空'); return; }
+  if (!text.trim()) { toastMsg('内容为空', 'error'); return; }
   const platform = (document.getElementById('manualPlatform') || {}).value || 'chatgpt';
   const btn = document.getElementById('btnManualAddModal');
   if (btn) btn.disabled = true;
@@ -267,7 +387,7 @@ async function submitManualAdd() {
     closeModal();
     toast(`已添加 ${data.inserted} 个邮箱, 跳过 ${data.skipped} 个`);
     refreshStatus(); loadEmails(); loadPlatforms();
-  } catch (e) { alert('添加失败: ' + e.message); }
+  } catch (e) { toastMsg('添加失败: ' + e.message, 'error'); }
   finally { if (btn) btn.disabled = false; }
 }
 
@@ -289,55 +409,64 @@ async function loadPlatforms() {
 
 // ── 注册控制 ──
 async function startRegister() {
-  const btn = document.getElementById('btnStart');
-  const count = parseInt(document.getElementById('cfgBatchSize').value) || 0;
-  if (btn) btn.disabled = true;  // 防重复点击（v3.1 审计）
-  try {
-    const data = await api('/register/start', { method: 'POST', body: JSON.stringify({ count }) });
-    toast(`注册任务已启动，共 ${data.total} 个邮箱`);
-    await refreshStatus();  // 立即收敛按钮态/徽章（其内部按 is_running 置 btnStart.disabled）
-  } catch (e) {
-    alert(e.message || '启动失败');
-    if (btn) btn.disabled = false;  // 启动失败则恢复可点
-  }
+  const btn = document.getElementById("btnStart");
+  await withBusy(btn, "启动中...", async () => {
+    const count = parseInt(document.getElementById("cfgBatchSize").value) || 0;
+    const data = await api("/register/start", { method: "POST", body: JSON.stringify({ count }) });
+    toastMsg(`注册任务已启动，共 ${data.total}/${data.pending_total} 个邮箱`, "success");
+    await refreshStatus();
+  });
 }
 async function controlRegister(action) {
-  try {
+  await withBusy(null, '', async () => {
     await api('/register/control', { method: 'POST', body: JSON.stringify({ action }) });
     refreshStatus();
-  } catch (e) { alert('操作失败: ' + e.message); }
+  });
+}
+
+// v3.4 T78：重试失败/CF 账号
+async function retryFailed() {
+  const btn = document.getElementById('btnRetryFailed');
+  try {
+    await withBusy(btn, '重试中...', async () => {
+      const d = await api('/register/retry-failed', { method: 'POST', body: '{}' });
+      toastMsg(`已回置 ${d.requeued} 个邮箱为待注册，可点「开始注册」重试`, 'success');
+      refreshStatus();
+    });
+  } catch (e) { toastMsg('重试失败: ' + e.message, 'error'); }
 }
 
 // ── 导出 / 清空 ──
 async function exportTokens() {
-  try {
+  const btn = document.getElementById('btnExportTokens') || document.querySelector('button[onclick="exportTokens()"]');
+  await withBusy(btn, '导出中...', async () => {
     const data = await api('/register/accounts/export');
     if (data.count === 0) { toast('暂无 token'); return; }
     await copyText(data.tokens.join('\n'));
     toast(`已复制 ${data.count} 个 token 到剪贴板`);
-  } catch (e) { alert('导出失败: ' + e.message); }
+  });
 }
 
 // v3.1.2：一键补齐 Token（为有 openai_refresh_token 但缺有效 access_token 的账号刷新补齐）
 async function replenishTokens() {
   if (!confirm('为有 refresh_token 但缺 access_token 的账号刷新补齐？\n（会真实调用 OpenAI 刷新，轮换的新 RT 自动落库）')) return;
-  toast('补齐中...');
-  try {
+  const btn = document.querySelector('button[onclick="replenishTokens()"]');
+  await withBusy(btn, '补齐中...', async () => {
     const d = await api('/register/replenish-tokens', { method: 'POST', body: '{}' });
     toast(`补齐完成：成功 ${d.replenished} · 失败 ${d.failed} · 无RT需重新注册 ${d.need_reregister || 0}`);
     loadAccounts(); refreshStatus();
-  } catch (e) { alert('补齐失败: ' + e.message); }
+  });
 }
 
 // v3.1.2：推送成功账号到 chatgpt2api 账号池（含三件套 + 取件凭证 mail_credential）
 async function pushToChatgpt2api() {
   if (!confirm('把所有成功账号推送到 chatgpt2api 账号池？\n（含 access_token/refresh_token/id_token + OpenAI密码 + 取件凭证）')) return;
-  toast('推送中...');
-  try {
+  const btn = document.querySelector('button[onclick="pushToChatgpt2api()"]');
+  await withBusy(btn, '推送中...', async () => {
     const d = await api('/register/push-chatgpt2api', { method: 'POST', body: '{}' });
-    if (d.success === false) { alert('推送失败: ' + (d.error || '未知错误')); return; }
+    if (d.success === false) { toastMsg('推送失败: ' + (d.error || '未知错误'), 'error'); return; }
     toast(`已推送 ${d.pushed} 个账号到 chatgpt2api（HTTP ${d.status}）`);
-  } catch (e) { alert('推送失败: ' + e.message); }
+  });
 }
 
 function openClear() {
@@ -360,92 +489,112 @@ async function confirmClear() {
     closeModal();
     toast(`已清空: 注册记录 ${data.deleted.accounts}, 邮箱 ${data.deleted.emails}, 任务 ${data.deleted.tasks}`);
     refreshStatus(); loadAccounts(); loadEmails();
-  } catch (e) { alert('清空失败: ' + e.message); }
+  } catch (e) { toastMsg('清空失败: ' + e.message, 'error'); }
   btn.disabled = false;
 }
 
 // ── 注册记录 ──
 async function loadAccounts(manual) {
-  try {
-    const search = document.getElementById('accSearch').value.trim();
-    const status = document.getElementById('accStatus').value;
-    const params = new URLSearchParams({ limit: ACC_PAGE_SIZE, offset: accPage * ACC_PAGE_SIZE });
-    if (status) params.set('status', status);
-    if (search) params.set('search', search);
-    const data = await api('/register/accounts?' + params.toString());
-    const tbody = document.getElementById('accountsBody');
+  const btn = manual ? document.querySelector('#tab-accounts button[onclick*="loadAccounts"]') : null;
+  await withBusy(btn, '加载中...', async () => {
+    // 显示骨架屏
+    const skel = document.getElementById('accountsSkeleton');
     const empty = document.getElementById('accountsEmpty');
-    document.getElementById('accCount').textContent = data.total || 0;
-    const pageCount = Math.max(1, Math.ceil((data.total || 0) / ACC_PAGE_SIZE));
-    document.getElementById('accPageInfo').textContent = `第 ${accPage + 1}/${pageCount} 页`;
-    if (!data.accounts || data.accounts.length === 0) {
-      if (accPage > 0) { accPage = 0; return loadAccounts(manual); }  // 页码越界自愈（删除/清空后回到第1页）
-      tbody.innerHTML = ''; empty.style.display = 'block'; return;
-    }
-    empty.style.display = 'none';
-    tbody.innerHTML = data.accounts.map((a, i) => {
-      const statusTag =
-        a.status === 'success' ? '<span class="tag success">成功</span>'
-        : a.status === 'failed' ? '<span class="tag failed">失败</span>'
-        : a.status === 'cf_blocked' ? '<span class="tag cf">CF拦截</span>'
-        : a.status === 'skipped' ? '<span class="tag skipped">跳过</span>'
-        : a.status === 'success_no_token' ? '<span class="tag success">成功(无token)</span>'
-        : '<span class="tag pending">待处理</span>';
-      const time = a.registered_at ? new Date(a.registered_at * 1000).toLocaleString() : '-';
-      return `<tr>
-        <td>${accPage * ACC_PAGE_SIZE + i + 1}</td>
-        <td class="mono">${escapeHtml(a.email)}</td>
-        <td>${pwCell(a.openai_password || a.password)}</td>
-        <td>${escapeHtml(a.name || '-')}</td>
-        <td>${escapeHtml(a.birthdate || '-')}</td>
-        <td>${statusTag}</td>
-        <td class="mono">${escapeHtml(a.proxy || '直连')}</td>
-        <td>${tokenCell(a.access_token)}</td>
-        <td style="white-space:nowrap">${c2apiReadyCell(a)}</td>
-        <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis">${escapeHtml(a.error || '-')}</td>
-        <td style="white-space:nowrap">${time}</td>
-      </tr>`;
-    }).join('');
-  } catch (e) { console.error(e); if (manual) toast('加载注册记录失败: ' + e.message); }
+    if (skel) skel.style.display = 'block';
+    if (empty) empty.style.display = 'none';
+    try {
+      const search = document.getElementById('accSearch').value.trim();
+      const status = document.getElementById('accStatus').value;
+      const params = new URLSearchParams({ limit: ACC_PAGE_SIZE, offset: accPage * ACC_PAGE_SIZE });
+      if (status) params.set('status', status);
+      if (search) params.set('search', search);
+      saveState();
+      const data = await api('/register/accounts?' + params.toString());
+      const tbody = document.getElementById('accountsBody');
+      const empty = document.getElementById('accountsEmpty');
+      document.getElementById('accCount').textContent = data.total || 0;
+      const pageCount = Math.max(1, Math.ceil((data.total || 0) / ACC_PAGE_SIZE));
+      document.getElementById('accPageInfo').textContent = `第 ${accPage + 1}/${pageCount} 页`;
+      if (!data.accounts || data.accounts.length === 0) {
+        if (accPage > 0) { accPage = 0; return loadAccounts(manual); }
+        tbody.innerHTML = ''; empty.style.display = 'block'; return;
+      }
+      empty.style.display = 'none';
+      tbody.innerHTML = data.accounts.map((a, i) => {
+        const statusTag =
+          a.status === 'success' ? '<span class="tag success">成功</span>'
+          : a.status === 'failed' ? '<span class="tag failed">失败</span>'
+          : a.status === 'cf_blocked' ? '<span class="tag cf">CF拦截</span>'
+          : a.status === 'skipped' ? '<span class="tag skipped">跳过</span>'
+          : a.status === 'success_no_token' ? '<span class="tag success">成功(无token)</span>'
+          : '<span class="tag pending">待处理</span>';
+        const time = a.registered_at ? new Date(a.registered_at * 1000).toLocaleString() : '-';
+        return `<tr>
+          <td>${accPage * ACC_PAGE_SIZE + i + 1}</td>
+          <td class="mono">${escapeHtml(a.email)}</td>
+          <td>${pwCell(a.openai_password || a.password)}</td>
+          <td>${escapeHtml(a.name || '-')}</td>
+          <td>${escapeHtml(a.birthdate || '-')}</td>
+          <td>${statusTag}</td>
+          <td class="mono">${escapeHtml(a.proxy || '直连')}</td>
+          <td>${tokenCell(a.access_token)}</td>
+          <td style="white-space:nowrap">${c2apiReadyCell(a)}</td>
+          <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis">${escapeHtml(a.error || '-')}</td>
+          <td style="white-space:nowrap">${time}</td>
+        </tr>`;
+      }).join('');
+      if (skel) skel.style.display = 'none';
+    } catch (e) { console.error(e); if (manual) toast('加载注册记录失败: ' + e.message); if (skel) skel.style.display = 'none'; }
+  });
 }
 
 // ── 邮箱池 ──
 async function loadEmails(manual) {
-  try {
-    const search = document.getElementById('emSearch').value.trim();
-    const status = document.getElementById('emStatus').value;
-    const platform = (document.getElementById('emPlatform') || {}).value || '';
-    const params = new URLSearchParams({ limit: EM_PAGE_SIZE, offset: emPage * EM_PAGE_SIZE });
-    if (status) params.set('status', status);
-    if (platform) params.set('platform', platform);
-    if (search) params.set('search', search);
-    const data = await api('/emails/?' + params.toString());
-    const tbody = document.getElementById('emailsBody');
+  const btn = manual ? document.querySelector('#tab-emails button[onclick*="loadEmails"]') : null;
+  await withBusy(btn, '加载中...', async () => {
+    // 显示骨架屏
+    const skel = document.getElementById('emailsSkeleton');
     const empty = document.getElementById('emailsEmpty');
-    const pageCount = Math.max(1, Math.ceil((data.total || 0) / EM_PAGE_SIZE));
-    document.getElementById('emPageInfo').textContent = `第 ${emPage + 1}/${pageCount} 页`;
-    if (!data.emails || data.emails.length === 0) {
-      if (emPage > 0) { emPage = 0; return loadEmails(manual); }  // 页码越界自愈
-      tbody.innerHTML = ''; empty.style.display = 'block'; return;
-    }
-    empty.style.display = 'none';
-    tbody.innerHTML = data.emails.map((e, i) => {
-      const statusTag = e.status === 'pending' ? '<span class="tag pending">待注册</span>'
-        : e.status === 'used' ? '<span class="tag used">已使用</span>'
-        : '<span class="tag skipped">' + escapeHtml(e.status) + '</span>';
-      const time = e.created_at ? new Date(e.created_at * 1000).toLocaleString() : '-';
-      return `<tr>
-        <td>${emPage * EM_PAGE_SIZE + i + 1}</td>
-        <td class="mono">${escapeHtml(e.email)}</td>
-        <td>${pwCell(e.password)}</td>
-        <td>${tokenCell(e.client_id)}</td>
-        <td>${tokenCell(e.refresh_token)}</td>
-        <td>${statusTag}</td>
-        <td style="white-space:nowrap">${time}</td>
-        <td><button class="btn btn-danger btn-sm" onclick="deleteEmail(${e.id})">删除</button></td>
-      </tr>`;
-    }).join('');
-  } catch (e) { console.error(e); if (manual) toast('加载邮箱失败: ' + e.message); }
+    if (skel) skel.style.display = 'block';
+    if (empty) empty.style.display = 'none';
+    try {
+      const search = document.getElementById('emSearch').value.trim();
+      const status = document.getElementById('emStatus').value;
+      const platform = (document.getElementById('emPlatform') || {}).value || '';
+      const params = new URLSearchParams({ limit: EM_PAGE_SIZE, offset: emPage * EM_PAGE_SIZE });
+      if (status) params.set('status', status);
+      if (platform) params.set('platform', platform);
+      if (search) params.set('search', search);
+      saveState();
+      const data = await api('/emails/?' + params.toString());
+      const tbody = document.getElementById('emailsBody');
+      const empty = document.getElementById('emailsEmpty');
+      const pageCount = Math.max(1, Math.ceil((data.total || 0) / EM_PAGE_SIZE));
+      document.getElementById('emPageInfo').textContent = `第 ${emPage + 1}/${pageCount} 页`;
+      if (!data.emails || data.emails.length === 0) {
+        if (emPage > 0) { emPage = 0; return loadEmails(manual); }
+        tbody.innerHTML = ''; empty.style.display = 'block'; return;
+      }
+      empty.style.display = 'none';
+      tbody.innerHTML = data.emails.map((e, i) => {
+        const statusTag = e.status === 'pending' ? '<span class="tag pending">待注册</span>'
+          : e.status === 'used' ? '<span class="tag used">已使用</span>'
+          : '<span class="tag skipped">' + escapeHtml(e.status) + '</span>';
+        const time = e.created_at ? new Date(e.created_at * 1000).toLocaleString() : '-';
+        return `<tr>
+          <td>${emPage * EM_PAGE_SIZE + i + 1}</td>
+          <td class="mono">${escapeHtml(e.email)}</td>
+          <td>${pwCell(e.password)}</td>
+          <td>${tokenCell(e.client_id)}</td>
+          <td>${tokenCell(e.refresh_token)}</td>
+          <td>${statusTag}</td>
+          <td style="white-space:nowrap">${time}</td>
+          <td><button class="btn btn-danger btn-sm" onclick="deleteEmail(${e.id})">删除</button></td>
+        </tr>`;
+      }).join('');
+      if (skel) skel.style.display = 'none';
+    } catch (e) { console.error(e); if (manual) toast('加载邮箱失败: ' + e.message); if (skel) skel.style.display = 'none'; }
+  });
 }
 
 async function deleteEmail(id) {
@@ -454,23 +603,24 @@ async function deleteEmail(id) {
     await api('/emails/' + id, { method: 'DELETE' });
     toast('已删除');
     loadEmails(); refreshStatus();
-  } catch (e) { alert('删除失败: ' + e.message); }
+  } catch (e) { toastMsg('删除失败: ' + e.message, 'error'); }
 }
 
 async function clearEmails() {
   if (!confirm('确定清空整个邮箱池？')) return;
-  try {
+  await withBusy(document.querySelector('button[onclick="clearEmails()"]'), '清空中...', async () => {
     const data = await api('/emails/clear', { method: 'POST', body: '{}' });
     toast('已清空 ' + data.deleted + ' 个邮箱');
     loadEmails(); refreshStatus();
-  } catch (e) { alert('清空失败: ' + e.message); }
+  });
 }
 
 // ── 代理池 ──
 let proxyHealthMap = {};  // line(已 trim) -> {ok, error}（v3.1 T3）
 
 async function loadProxies(manual) {
-  try {
+  const btn = manual ? document.querySelector('button[onclick*="loadProxies"]') : null;
+  const fn = async () => {
     const data = await api('/proxies/');
     const body = document.getElementById('proxiesBody');
     const empty = document.getElementById('proxiesEmpty');
@@ -486,28 +636,39 @@ async function loadProxies(manual) {
       const rowCls = (h && !h.ok) ? ' class="failed"' : '';
       return `<tr${rowCls}><td>${i + 1}</td><td class="mono">${escapeHtml(l)}</td><td>${type}</td><td>${renderProxyHealth(key)}</td></tr>`;
     }).join('') + (lines.length > 100 ? `<tr><td colspan="4" class="muted">… 还有 ${lines.length - 100} 条未显示，点击「编辑代理池」查看全部</td></tr>` : '');
-  } catch (e) { console.error(e); if (manual) toast('加载代理池失败: ' + e.message); }
+  };
+  await withBusy(btn, '刷新中...', fn);
 }
 
-// v3.1 T3：批量探测代理池可用性（TCP 可达性，≠ 账号可用）
+// v3.4 T88：批量探测代理池可用性（真实 HTTP 出口探测，含出口 IP/国家/延迟）
 async function checkProxyHealth() {
-  toast('探测中...（并发 10，3s 超时；TCP 可达≠账号可用）');
+  toast('探测中...（HTTP 出口探测，8s 超时，并发 10）');
   try {
     const d = await api('/proxies/health');
     proxyHealthMap = {};
     (d.results || []).forEach(r => { proxyHealthMap[String(r.line).trim()] = r; });
     document.getElementById('proxyHealthSummary').innerHTML =
-      '可用 <b style="color:var(--green)">' + d.ok + '</b> / 失效 <b style="color:var(--red)">' + d.failed + '</b> / 总计 ' + d.total;
-    loadProxies();  // 重新渲染带徽章
+      '可用 <b style="color:var(--green)">' + d.ok + '</b> / 失效 <b style="color:var(--red)">' + d.failed + '</b> / 总计 ' + d.total
+      + (d.blacklist_size ? ' · 黑名单 <b style="color:var(--red)">' + d.blacklist_size + '</b>' : '');
+    loadProxies();
   } catch (e) { toast('代理探测失败: ' + e.message); }
 }
 
 function renderProxyHealth(line) {
   const h = proxyHealthMap[line];
   if (!h) return '<span class="muted">未探测</span>';
-  return h.ok
-    ? '<span class="tag success">✅ 可达</span>'
-    : `<span class="tag danger" title="${escapeHtml(h.error)}">❌ ${escapeHtml(h.error)}</span>`;
+  if (h.ok) {
+    let label = '✅ ';
+    if (h.exit_ip) {
+      label += h.exit_ip;
+      if (h.country) label += ' (' + h.country + ')';
+      if (h.latency_ms) label += ' ' + h.latency_ms + 'ms';
+    } else {
+      label += '可达(TCP)';
+    }
+    return `<span class="tag success" title="出口IP: ${h.exit_ip || 'N/A'}">${label}</span>`;
+  }
+  return `<span class="tag danger" title="${escapeHtml(h.error)}">❌ ${escapeHtml(h.error)}</span>`;
 }
 
 function openProxyEditor() {
@@ -521,7 +682,7 @@ function openProxyEditor() {
         <button class="btn btn-ghost" onclick="closeModal()">取消</button>
         <button class="btn btn-success" onclick="saveProxies()">保存</button>
       </div>`);
-  }).catch(e => alert('加载代理池失败: ' + e.message));
+  }).catch(e => toastMsg('加载代理池失败: ' + e.message, 'error'));
 }
 async function saveProxies() {
   const content = document.getElementById('proxyContent').value;
@@ -530,7 +691,7 @@ async function saveProxies() {
     closeModal();
     toast('代理池已保存: ' + data.count + ' 条');
     loadProxies(); refreshStatus();
-  } catch (e) { alert('保存失败: ' + e.message); }
+  } catch (e) { toastMsg('保存失败: ' + e.message, 'error'); }
 }
 async function clearProxies() {
   if (!confirm('确定清空代理池？')) return;
@@ -539,12 +700,101 @@ async function clearProxies() {
     closeModal();
     toast('代理池已清空');
     loadProxies(); refreshStatus();
-  } catch (e) { alert('失败: ' + e.message); }
+  } catch (e) { toastMsg('失败: ' + e.message, 'error'); }
 }
 
-// ── 日志（增量拉取：记录 lastLogId，只拉新增，降低轮询压力） ──
+// ── 日志（v3.4 T95：SSE 实时推送，轮询降级兜底；级别筛选/搜索/暂停滚动/导出） ──
+let logSseSource = null;
+let logSseFailed = 0;
+let logPaused = false;
+
+async function startLogSse() {
+  if (logSseSource) return;
+  logSseFailed = 0;
+  try {
+    const key = getAuthKey();
+    const resp = await fetch('/api/logs/stream', {
+      headers: key ? { 'X-Auth-Key': key } : {},
+    });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    logSseSource = true;
+
+    const readLoop = async () => {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split('\n\n');
+        buf = lines.pop() || '';
+        for (const block of lines) {
+          if (!block.startsWith('data: ')) continue;
+          const payload = block.slice(6);
+          let log;
+          try { log = JSON.parse(payload); } catch (e) { continue; }
+          if (log.error && logSseFailed++ >= 3) {
+            // SSE 连续失败，回退轮询
+            logSseSource = null;
+            startPollingLogs();
+            return;
+          }
+          appendLogEntry(log);
+        }
+      }
+      logSseSource = null;
+    };
+    readLoop().catch(() => { logSseSource = null; });
+  } catch (e) {
+    logSseFailed++;
+    if (logSseFailed >= 3) {
+      logSseSource = null;
+      startPollingLogs();
+    }
+  }
+}
+
+function appendLogEntry(l) {
+  if (!l || !l.message) return;
+  // 级别过滤
+  const levelFilter = document.getElementById('logLevelFilter');
+  if (levelFilter && levelFilter.value && levelFilter.value !== 'all' && l.level !== levelFilter.value) return;
+  // 搜索过滤
+  const searchInput = document.getElementById('logSearchInput');
+  if (searchInput && searchInput.value.trim()) {
+    const q = searchInput.value.trim().toLowerCase();
+    if (!l.message.toLowerCase().includes(q)) return;
+  }
+
+  const box = document.getElementById('logBox');
+  if (!box) return;
+  const time = new Date((l.created_at || 0) * 1000).toLocaleTimeString();
+  const cls = l.level === 'error' ? 'log-error' : l.level === 'warning' ? 'log-warning' : 'log-info';
+  const div = document.createElement('div');
+  div.className = cls;
+  div.innerHTML = `<span class="log-time">[${time}]</span> ${escapeHtml(l.message)}`;
+  box.appendChild(div);
+
+  // 裁剪上限
+  const MAX_LOG_NODES = 1500;
+  while (box.childElementCount > MAX_LOG_NODES) box.removeChild(box.firstChild);
+
+  // 自动滚动（暂停时不动）
+  if (!logPaused) box.scrollTop = box.scrollHeight;
+}
+
 async function loadLogs(force) {
-  if (force) lastLogId = 0;  // 手动刷新 / 切页：全量重置
+  // v3.4 T95：如有 SSE 则不再轮询；否则回退到此轮询逻辑
+  if (logSseSource) {
+    if (force) {
+      // 手动刷新：重置后重新连接 SSE
+      stopLogSse();
+      startLogSse();
+    }
+    return;
+  }
+  if (force) lastLogId = 0;
   try {
     const url = '/logs?limit=1000' + (lastLogId ? '&after_id=' + lastLogId : '');
     const data = await api(url);
@@ -553,25 +803,45 @@ async function loadLogs(force) {
       if (!lastLogId) box.innerHTML = '<div class="log-info">暂无日志</div>';
       return;
     }
-    if (!lastLogId) box.innerHTML = '';  // 首次/重置：清空后全量渲染
-    const parts = data.logs.map(l => {
-      const time = new Date(l.created_at * 1000).toLocaleTimeString();
-      const cls = l.level === 'error' ? 'log-error' : l.level === 'warning' ? 'log-warning' : 'log-info';
-      return `<div class="${cls}"><span class="log-time">[${time}]</span> ${escapeHtml(l.message)}</div>`;
-    });
-    // 首次全量走 /logs（DESC 最新在前）需 reverse 让最新在底部；增量 after_id 已是 ASC 直接追加
-    box.insertAdjacentHTML('beforeend', (lastLogId ? parts : parts.reverse()).join(''));
+    if (!lastLogId) box.innerHTML = '';
+    data.logs.forEach(l => appendLogEntry(l));
     data.logs.forEach(l => { if (l.id > lastLogId) lastLogId = l.id; });
-    // v3.1 审计：裁剪日志 DOM 上限，防长时间批量注册时节点无限膨胀导致页面卡顿
-    const MAX_LOG_NODES = 1500;
-    while (box.childElementCount > MAX_LOG_NODES) box.removeChild(box.firstChild);
-    box.scrollTop = box.scrollHeight;
   } catch (e) { console.error(e); if (force) toast('加载日志失败: ' + e.message); }
 }
+
+function stopLogSse() {
+  logSseSource = null;
+}
+
+function startPollingLogs() {
+  // 轮询降级兜底（已有 loadLogs 实现）
+}
+
+function toggleLogScroll() {
+  logPaused = !logPaused;
+  const btn = document.getElementById('btnLogScroll');
+  if (btn) btn.textContent = logPaused ? '▶ 继续滚动' : '⏸ 暂停滚动';
+}
+
+function exportLogs() {
+  const box = document.getElementById('logBox');
+  if (!box) return;
+  const text = box.innerText;
+  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'logs.txt';
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
 async function clearLogs() {
   if (!confirm('确定清空日志？')) return;
-  try { await api('/logs/clear', { method: 'POST', body: '{}' }); loadLogs(true); toast('日志已清空'); }
-  catch (e) { alert('清空失败: ' + e.message); }
+  await withBusy(document.querySelector('button[onclick="clearLogs()"]'), '清空中...', async () => {
+    await api('/logs/clear', { method: 'POST', body: '{}' });
+    loadLogs(true);
+    toast('日志已清空');
+  });
 }
 
 // ── 设置 ──
@@ -608,6 +878,8 @@ async function saveSettings() {
       { key: 'otp_poll_interval_sec', value: document.getElementById('cfgOtpPoll').value },
       { key: 'email_api_base', value: document.getElementById('cfgEmailApiBase').value },
       { key: 'user_agent', value: document.getElementById('cfgUserAgent').value },
+      { key: 'browser_pool_size', value: document.getElementById('cfgBrowserPoolSize').value },
+      { key: 'cf_retry_max', value: document.getElementById('cfgCfRetryMax').value },
     ];
     // 掩码占位符不覆盖真实密钥（服务端已对敏感字段脱敏为 ******）
     const keyValue = document.getElementById('cfgC2apiKey').value;
@@ -619,7 +891,7 @@ async function saveSettings() {
     settings.push({ key: 'use_browser', value: document.getElementById('cfgUseBrowser').checked ? 'true' : 'false' });
     for (const s of settings) await api('/settings/', { method: 'POST', body: JSON.stringify(s) });
     toast('设置已保存');
-  } catch (e) { alert('保存失败: ' + e.message); }
+  } catch (e) { toastMsg('保存失败: ' + e.message, 'error'); }
 }
 
 // ── Token 保鲜巡检仪表盘（v3.1 T2） ──
@@ -738,7 +1010,7 @@ function openAdvanced() {
         <thead><tr><th>键</th><th>值</th></tr></thead>
         <tbody>${rows || '<tr><td colspan="2" class="muted">空配置</td></tr>'}</tbody>
       </table></div>`);
-  }).catch(e => alert('加载高级设置失败: ' + e.message));
+  }).catch(e => toastMsg('加载高级设置失败: ' + e.message, 'error'));
 }
 
 // v3.1 T4：保存高级设置（4 个 v3.0 键，后端按 config_schema 转类型存 config.json）
@@ -754,7 +1026,7 @@ async function saveAdvanced() {
     closeModal();
     toast('高级设置已保存，重启后生效');
     loadTokenHealth();  // 刷新 token 仪表盘状态
-  } catch (e) { alert('保存失败: ' + e.message); }
+  } catch (e) { toastMsg('保存失败: ' + e.message, 'error'); }
 }
 
 // ── 通用 ──
@@ -785,10 +1057,11 @@ function switchTab(name, el) {
   document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
   if (el) el.classList.add('active');
   document.getElementById('tab-' + name).classList.add('active');
+  saveState();
   if (name === 'accounts') loadAccounts();
   else if (name === 'emails') { loadPlatforms(); loadEmails(); }
   else if (name === 'proxies') loadProxies();
-  else if (name === 'logs') loadLogs(true);
+  else if (name === 'logs') { loadLogs(true); startLogSse(); }
   else if (name === 'settings') { loadSettings(); loadTokenHealth(); }
 }
 
@@ -815,8 +1088,18 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // ── 初始化 ──
+const savedTab = loadState();
 refreshStatus();
 loadAccounts();
 loadLogs(true);
 loadSettings();
 startPolling();
+// 恢复 tab 选中状态
+const tabEl = document.querySelector(`.tab[onclick*="'${savedTab}'"]`);
+if (tabEl) {
+  switchTab(savedTab, tabEl);
+} else {
+  // 默认 accounts
+  const defaultTab = document.querySelector('.tab');
+  if (defaultTab) switchTab('accounts', defaultTab);
+}
