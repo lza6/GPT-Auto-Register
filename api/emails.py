@@ -24,7 +24,7 @@ class ManualAddRequest(BaseModel):
     platform: str = "chatgpt"  # 目标平台（多平台注册去重）
 
 
-@router.get("/pending")
+@router.get("/pending", summary="待处理邮箱", description="返回当前待注册的邮箱列表。")
 async def pending_emails(limit: int = 100) -> dict:
     emails = get_pending_emails(limit=limit)
     return {"emails": emails, "total": count_emails("pending")}
@@ -64,7 +64,7 @@ async def list_emails(status: str = "", limit: int = 0, offset: int = 0, search:
     return {"emails": [dict(r) for r in rows], "total": total}
 
 
-@router.post("/manual-add")
+@router.post("/manual-add", summary="手动添加邮箱", description="手动批量添加邮箱，支持 91kami 格式多行粘贴，每行格式：邮箱----密码----client_id----refresh_token。")
 async def manual_add(req: ManualAddRequest) -> dict:
     """手动批量添加邮箱（支持 91kami 格式多行粘贴）"""
     if not req.text.strip():
@@ -94,15 +94,13 @@ async def manual_add(req: ManualAddRequest) -> dict:
 
 
 # ── 多平台邮箱库（去重/审计）────────────────────────────
-@router.get("/platforms")
+@router.get("/platforms", summary="平台列表", description="所有出现过的平台列表（前端平台切换按钮数据源）。")
 async def get_platforms() -> dict:
-    """所有出现过的平台列表（前端平台切换按钮数据源）。"""
     return {"platforms": list_platforms(), "stats": platform_stats()}
 
 
-@router.get("/platform-map/{email}")
+@router.get("/platform-map/{email}", summary="邮箱平台映射", description="查一个邮箱在各平台的使用情况（哪些平台注册过/状态）。")
 async def get_email_platform_map(email: str) -> dict:
-    """查一个邮箱在各平台的使用情况（哪些平台注册过/状态）。"""
     return {"email": email, "platforms": email_platform_map(email)}
 
 

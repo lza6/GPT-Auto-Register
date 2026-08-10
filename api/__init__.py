@@ -18,6 +18,9 @@ from api import proxies as proxies_router
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
 
+# 统一版本号（B19：所有地方引用此常量）
+VERSION = "3.4.0"
+
 # 默认占位符视为「未配置」→ 不强制鉴权（兼容老部署），同时打日志提示
 DEFAULT_AUTH_PLACEHOLDERS = {"", "请修改为你的管理密钥", "change-me"}
 
@@ -122,7 +125,7 @@ class AuthKeyMiddleware:
 
 def create_app() -> FastAPI:
     config = load_config()
-    app_version = str(config.get("version", "3.4.0"))
+    app_version = str(config.get("version", VERSION))
     app = FastAPI(title="GPT 自动注册", version=app_version)
 
     # B15: Prometheus 指标端点（需在 AuthKeyMiddleware 之前注册，放行白名单）
@@ -196,7 +199,7 @@ def create_app() -> FastAPI:
             email_api_reachable = "unreachable"
 
         # 用 config 中的版本号（而非 hardcoded）
-        version = str(config.get("version", "3.4.0"))
+        version = str(config.get("version", VERSION))
         all_ok = db_ok and cf_status in ("ok", "unknown")
         return {
             "status": "ok" if all_ok else "degraded",

@@ -39,7 +39,7 @@ async def token_health() -> dict:
     return {"enabled": False, "last_scan_at": 0, "last_scan_at_human": "", "result": {}}
 
 
-@router.get("/account-readiness")
+@router.get("/account-readiness", summary="账号资产健康度", description="c2api 就绪率聚合（AT/RT/密码/取件凭证四维），前端渲染就绪率卡片。")
 async def account_readiness() -> dict:
     """v3.4 T94：账号资产健康度聚合——c2api 就绪率（AT/RT/密码/取件凭证 四维）。
 
