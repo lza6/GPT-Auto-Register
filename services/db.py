@@ -178,6 +178,17 @@ def add_log(level: str, message: str, data: Any = None) -> None:
             )
 
 
+# v3.4 日志 flusher 接口（兼容测试/旧版调用，当前版本同步直写，无需后台 flusher）
+def stop_log_flusher() -> None:
+    """停止日志 flusher（当前版本同步直写，无后台线程，该函数为兼容旧调用而存在）。"""
+    pass
+
+
+def flush_logs() -> None:
+    """排空日志队列（当前版本同步直写，无需排空，该函数为兼容旧调用而存在）。"""
+    pass
+
+
 def get_logs(limit: int = 100, offset: int = 0) -> list[dict]:
     with db_session() as conn:
         rows = conn.execute(
@@ -364,6 +375,38 @@ def count_emails(status: str = "", search: str = "") -> int:
         where = (" WHERE " + " AND ".join(conds)) if conds else ""
         row = conn.execute(f"SELECT COUNT(*) as c FROM emails{where}", params).fetchone()
     return row["c"] if row else 0
+
+
+def requeue_failed_emails(failure_type: str = "") -> int:
+    """把 failed/cf_blocked 账号对应的邮箱回置为 pending，供 /start 重新注册。
+
+    可选 failure_type 定向回置某类失败子集。
+    回置 emails.status 的同时清空 accounts.failure_type，确保诊断分类准确。
+    """
+    with db_session() as conn:
+        if failure_type:
+            rows = conn.execute(
+                "SELECT email FROM accounts WHERE status IN ('failed','cf_blocked') AND failure_type = ?",
+                (failure_type,),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT email FROM accounts WHERE status IN ('failed','cf_blocked')"
+            ).fetchall()
+        n = 0
+        for r in rows:
+            cur = conn.execute(
+                "UPDATE emails SET status='pending', used_at=NULL WHERE email=? AND status!='pending'",
+                (r["email"],),
+            )
+            n += cur.rowcount
+            # 重置对应 accounts 的 failure_type（B3 修复）
+            if cur.rowcount > 0:
+                conn.execute(
+                    "UPDATE accounts SET failure_type = '' WHERE email = ? AND (failure_type IS NOT NULL AND failure_type != '')",
+                    (r["email"],),
+                )
+    return n
 
 
 def get_stats() -> dict:
