@@ -3,9 +3,9 @@
 > 统一记录项目所有已完成任务、验证结果、剩余待办、已知限制和下次迭代建议。
 > **下次接手先读此文件**，避免重复审计和盲目重跑已验证的检查。
 
-**当前版本**: v3.3.0 (已发布) + v3.4 开发中 (未提交)
-**测试基线**: 288 项全绿
-**最后更新**: 2026-08-08
+**当前版本**: v3.5.0 (已发布)
+**测试基线**: 422 项全绿
+**最后更新**: 2026-08-11
 
 ---
 
@@ -21,6 +21,7 @@
 | v3.1.1 | v3.1.1 | d5247ed | 2026-08-06 | 多代理7维审计+对抗验证+批判复审循环+PKCE/RT修复 |
 | v3.3.0 | v3.3.0 | ac3a9af | 2026-08-08 | 一账号一指纹(TLS指纹池)+多平台邮箱库+邮箱池平台切换UI |
 | v3.4 | 未发布 | 工作区脏 | 2026-08-09 | 日志异步批量+SSE推送+告警通知+代理黑名单+CF solver集成+失败重试+资产健康仪表盘 |
+| **v3.5.0** | **v3.5.0** | **当前** | **2026-08-11** | **全量优化闭环：脱敏层+错误分类+进度持久化+状态机+BrowserRegister拆分+类型化模型+配置冻结+422测试全绿** |
 
 ---
 
@@ -64,7 +65,47 @@
 
 ---
 
-## 三、各任务验证结果
+## 四、v3.5.0 全量优化闭环（已完成）
+
+### P0: 脱敏层 + 增强错误分类
+| 任务 | 状态 | 文件 | 描述 |
+|------|------|------|------|
+| P0-1 统一脱敏层 | ✅ | `sensitive_policy.json`, `services/sanitizer.py` | 移植敏感策略文件，递归脱敏 dict/list/str/Exception，9 个正则替换规则 |
+| P0-2 增强错误分类 | ✅ | `services/protocol_register.py` | 5 类精细分类（network/account/mailbox/auth_state/rate_limit），30+ 标记词 |
+| P0-3 测试 | ✅ | `tests/test_error_classification.py` | 73 个测试覆盖分类函数和 _classify_failure 集成 |
+
+### P1: 注册进度持久化 + 状态机 + BrowserRegister 拆分
+| 任务 | 状态 | 文件 | 描述 |
+|------|------|------|------|
+| P1-1 进度持久化 | ✅ | `services/registration_progress.py` | @track_registration 装饰器，JSONL 持久化，注册阶段历史记录 |
+| P1-2 状态机重构 | ✅ | `services/protocol_register.py` | 10 阶段显式状态机（RegistrationState）+ 数据类上下文 + 转场验证 |
+| P1-3 BrowserRegister 拆分 | ✅ | `services/browser_page_detector.py`, `browser_form_filler.py`, `browser_oauth.py` | 902 行 → 4 个模块，保持向后兼容 |
+
+### P2: 类型化模型 + 配置冻结
+| 任务 | 状态 | 文件 | 描述 |
+|------|------|------|------|
+| P2-1 类型化模型 | ✅ | `services/models.py` | AccountData frozen dataclass + safe_snapshot() 自动脱敏 |
+| P2-2 配置冻结 | ✅ | `services/config_service.py` | RuntimeConfig 不可变，MappingProxyType 保护 + 线程安全 reload |
+| P2-3 测试 | ✅ | `tests/test_models.py`, `tests/test_config_service.py` | 20 个测试全部通过 |
+
+### 测试结果
+```
+422 passed, 303 warnings in 278.55s (0:04:38)
+```
+
+### 新增文件清单
+- `sensitive_policy.json` — 敏感凭据脱敏策略
+- `services/sanitizer.py` — 统一脱敏层
+- `services/registration_progress.py` — 注册进度持久化
+- `services/models.py` — 类型化数据模型
+- `services/config_service.py` — 配置冻结层
+- `services/browser_page_detector.py` — 浏览器页面检测
+- `services/browser_form_filler.py` — 浏览器表单填写
+- `services/browser_oauth.py` — 浏览器 OAuth 模块
+- `tests/test_error_classification.py` — 错误分类测试
+- `tests/test_registration_progress.py` — 进度持久化测试
+- `tests/test_models.py` — 数据模型测试
+- `tests/test_config_service.py` — 配置服务测试
 
 ### v3.3.0 已验证
 
