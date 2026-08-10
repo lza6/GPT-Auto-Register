@@ -6,6 +6,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# ─── 第1层：系统依赖（低频变化） ────────────────────────────────
 # camoufox(firefox 内核) headless 运行库 + xvfb 兜底
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc libpq-dev \
@@ -15,17 +16,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xvfb \
     && rm -rf /var/lib/apt/lists/*
 
+# ─── 第2层：Python 依赖（仅 requirements.txt 变化时失效） ───────
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
+# ─── 第3层：camoufox 浏览器引擎（低频变化） ─────────────────────
 # 预下载 camoufox 浏览器引擎（避免运行期拉取）
 RUN python -m camoufox fetch || echo "[warn] camoufox fetch 失败，运行期再试"
 
-# 源码（config.json / proxies.txt / data / logs 由 volume 挂载覆盖，不进镜像）
+# ─── 第4层：应用源码（高频变化，独立缓存层） ────────────────────
+# config.json / proxies.txt / data / logs 由 volume 挂载覆盖，不进镜像
 COPY main.py ./
 COPY api ./api
 COPY services ./services
-COPY scripts ./scripts
 COPY cf_solver ./cf_solver
 COPY web_dist ./web_dist
 COPY config.example.json ./config.json
