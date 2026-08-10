@@ -79,7 +79,7 @@
       </h2>
       <div class="controls" style="margin-bottom:12px">
         <input type="text" id="accSearch" placeholder="🔍 搜索邮箱..." style="max-width:240px" oninput="onAccSearch()">
-        <select id="accStatus" style="max-width:160px" onchange="accPage=0;loadAccounts()">
+        <select id="accStatus" style="max-width:160px" onchange="accResetLoad()">
           <option value="">全部状态</option>
           <option value="success">成功</option>
           <option value="failed">失败</option>
@@ -87,9 +87,9 @@
           <option value="success_no_token">成功(无token)</option>
           <option value="pending">待处理</option>
         </select>
-        <button class="btn btn-ghost btn-sm" onclick="accPage=Math.max(0,accPage-1);loadAccounts()">◀ 上一页</button>
+        <button class="btn btn-ghost btn-sm" onclick="accPagePrev()">◀ 上一页</button>
         <span class="muted" id="accPageInfo">第 1 页</span>
-        <button class="btn btn-ghost btn-sm" onclick="accPage=accPage+1;loadAccounts()">下一页 ▶</button>
+        <button class="btn btn-ghost btn-sm" onclick="accPageNext()">下一页 ▶</button>
       </div>
       <div style="overflow-x:auto">
       <table>
@@ -111,18 +111,18 @@
       </h2>
       <div class="hint">邮箱池是微软邮箱账号，用于接收注册验证码。格式：<code>邮箱----密码----client_id----refresh_token</code>（每行一个，可从 91kami 导出或手动粘贴）。</div>
       <div class="controls" style="margin-bottom:12px">
-        <select id="emPlatform" style="max-width:150px" onchange="emPage=0;loadEmails()" title="平台切换：同邮箱可在不同平台各注册一次">
+        <select id="emPlatform" style="max-width:150px" onchange="emResetLoad()" title="平台切换：同邮箱可在不同平台各注册一次">
           <option value="">全部平台</option>
         </select>
         <input type="text" id="emSearch" placeholder="🔍 搜索邮箱..." style="max-width:240px" oninput="onEmSearch()">
-        <select id="emStatus" style="max-width:160px" onchange="emPage=0;loadEmails()">
+        <select id="emStatus" style="max-width:160px" onchange="emResetLoad()">
           <option value="">全部状态</option>
           <option value="pending">待注册</option>
           <option value="used">已使用</option>
         </select>
-        <button class="btn btn-ghost btn-sm" onclick="emPage=Math.max(0,emPage-1);loadEmails()">◀ 上一页</button>
+        <button class="btn btn-ghost btn-sm" onclick="emPagePrev()">◀ 上一页</button>
         <span class="muted" id="emPageInfo">第 1 页</span>
-        <button class="btn btn-ghost btn-sm" onclick="emPage=emPage+1;loadEmails()">下一页 ▶</button>
+        <button class="btn btn-ghost btn-sm" onclick="emPageNext()">下一页 ▶</button>
       </div>
       <div style="overflow-x:auto">
       <table>
@@ -242,7 +242,7 @@
 
 <div id="toast"></div>
 
-<script src="app.js"></script>
+<script type="module" src="app.js"></script>
 
 </body>
 </html>
