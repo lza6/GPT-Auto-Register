@@ -57,6 +57,10 @@ _CONFIG_SCHEMA: dict[str, tuple[tuple[type, ...], Any, bool]] = {
     "warmup_retries": ((int,), 2, False),
     # 注册成功后自动绑 TOTP 2FA（v4.0 P1-7）：同会话快路径，失败不阻塞注册成功
     "totp_enabled": ((bool, str), True, False),
+    # 阶段间随机 think_time（v4.0 P1-8，毫秒，0=关闭）
+    "think_time_ms": ((int,), 1500, False),
+    # 链路级 TLS 瞬断重试次数（v4.0 P1-9，同 session 重试）
+    "tls_retries": ((int,), 2, False),
 }
 
 

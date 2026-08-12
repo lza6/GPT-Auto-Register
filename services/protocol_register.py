@@ -92,6 +92,13 @@ RATE_LIMIT_MARKERS = (
     "rate_limit", "too_many", "429", "too many", "ratelimit",
 )
 
+# v4.0 P1-9：链路级 TLS 瞬断重试标记（只对这些重试；HTTP 错误码/超时/业务异常一律原样抛，
+# 免得把服务端明确拒绝也变成重试，反而更像异常流量）
+_TLS_RETRY_MARKERS = (
+    "tls", "ssl", "sslerror", "curl: (35)", "connection reset",
+    "eof occurred", "broken pipe", "remote disconnected", "econnreset",
+)
+
 
 def error_text(value) -> str:
     if isinstance(value, dict):
@@ -376,12 +383,22 @@ class ProtocolRegister:
         # （_register_sync 开头 _fresh_fingerprint 选一次，线程局部贯穿全流程，不同账号不同指纹）。
         # v3.4 T80：注册专用线程池（由 register_engine 注入；None 时 run_in_executor 走默认池，向后兼容）。
         self._executor = None
+        # v4.0 P1-8：阶段间随机 think_time（模拟人类节奏，防 bot-timing 检测）
+        try:
+            self._think_time_ms = max(0, int(config.get("think_time_ms", 1500)))
+        except (TypeError, ValueError):
+            self._think_time_ms = 1500
+        # v4.0 P1-9：链路级 TLS 瞬断重试次数（同 session 重试，绝不重建丢 cookie）
+        try:
+            self._tls_retries = max(0, int(config.get("tls_retries", 2)))
+        except (TypeError, ValueError):
+            self._tls_retries = 2
         # v4.0 P1-7：注册成功后自动绑 TOTP 2FA（快路径，同会话；失败不阻塞注册成功）
         self._totp_enabled = str(config.get("totp_enabled", "true")).strip().lower() not in ("0", "false", "off", "no")
         # v4.0 P0-3：warmup 种 cookie（GET chatgpt.com 种 oai-did，防 authorize 409 invalid_state）
         self._warmup_enabled = str(config.get("warmup_enabled", "true")).strip().lower() not in ("0", "false", "off", "no")
         try:
-            self._warmup_retries = max(1, int(config.get("warmup_retries") or 2))
+            self._warmup_retries = max(1, int(config.get("warmup_retries", 2)))
         except (TypeError, ValueError):
             self._warmup_retries = 2
         # 真实 sentinel SDK 求解（quickjs）：优先于合成 PoW，JS/PoW 失败自动降级合成。
@@ -438,7 +455,45 @@ class ProtocolRegister:
         session = cffi.Session(impersonate=fingerprint, verify=tls_verify_enabled(self.config), timeout=40)
         if proxy_url:
             session.proxies = {"http": proxy_url, "https": proxy_url}
+        # v4.0 P1-9：TLS 瞬断在 session 层原 session 重试（重建丢 oai-did/csrf → 409 invalid_state）
+        if self._tls_retries > 0:
+            session.get = self._tls_retry_wrap(session.get)
+            session.post = self._tls_retry_wrap(session.post)
         return session
+
+    def _tls_retry_wrap(self, fn):
+        """包装 session.get/post：只对 TLS 瞬断重试（同 session 重试，绝不重建丢 cookie）。
+
+        链路级 TLS 瞬断（curl:35，实测 5.4% 偶发）连 HTTP 请求都没发出去就炸；
+        必须原 session 重试——中后段 session 装着 warmup 种的 oai-did/csrf，重建全丢直接 409。
+        HTTP 错误码/超时/业务异常一律原样抛，不误当瞬断重试（重试反而像异常流量）。
+        """
+        def wrapper(*args, **kwargs):
+            for attempt in range(self._tls_retries + 1):
+                try:
+                    return fn(*args, **kwargs)
+                except Exception as e:
+                    if attempt >= self._tls_retries or not self._looks_tls_error(e):
+                        raise
+                    logger.debug("TLS 瞬断重试 %d/%d: %s", attempt + 1, self._tls_retries, e)
+                    time.sleep(1.5 * (attempt + 1))
+            raise  # 不可达
+        return wrapper
+
+    @staticmethod
+    def _looks_tls_error(exc: BaseException) -> bool:
+        text = str(exc).lower()
+        return any(m in text for m in _TLS_RETRY_MARKERS)
+
+    def _sleep_think_time(self) -> None:
+        """阶段间随机延迟（think_time_ms 的 0.5~1.5 倍），模拟人类操作节奏。
+
+        多阶段 OAuth 流在亚秒级跑完是 OpenAI bot-timing 检测的强信号。
+        """
+        if self._think_time_ms <= 0:
+            return
+        delay = self._think_time_ms * random.uniform(0.5, 1.5) / 1000.0
+        time.sleep(delay)
 
     def _navigation_headers(self, ua: str = "", accept_lang: str = "", fingerprint: str = "") -> dict:
         """整页导航型请求头（warmup/authorize 首次页面加载用）。
@@ -936,6 +991,8 @@ class ProtocolRegister:
                     sm.fail()
                     break
                 sm.transition(next_state, "阶段完成")
+                # v4.0 P1-8：阶段间随机 think_time（防 bot-timing；OTP 等待本身很慢，不影响总时长感知）
+                self._sleep_think_time()
             return ctx.result
         except Exception as e:
             result["error"] = f"协议注册异常: {e}"
