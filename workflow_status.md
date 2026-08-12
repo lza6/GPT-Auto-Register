@@ -395,7 +395,7 @@ v3.0 后端能力已落地（浏览器池/schema/双引擎契约/token巡检/代
 | 11 | 阶段7 E5 账号存活/恢复 | 子代理 | ⏳ | 单测 + 真实账号冒烟 |
 | 12 | 阶段8 支付提链/2FA（高复杂度，单独决策） | 子代理 | ⏳ | 分阶段评估 |
 | 13 | 全量测试验收 + 覆盖率 | 主控 | ✅ | pytest 全量 EXIT=0（554 项，0 失败） |
-| 14 | 独立审查线程六维复验 | 审查子代理 | ⏳ | 六维报告 |
+| 14 | 独立审查线程六维复验 | 审查子代理 | ✅ | 六维报告：502 passed/0 failed，无冲突 |
 | 15 | 鉴权文档更新（P0-1，仅文档） | 主控 | ⏳ | docs/README 审查 |
 | 16 | 文档/记忆/发版同步 | 主控 | ⏳ | README/记忆/本文件 |
 
@@ -406,3 +406,13 @@ v3.0 后端能力已落地（浏览器池/schema/双引擎契约/token巡检/代
 | 2026-08-12 | 协调 | **检测到并发会话**并行做同一对标改造（v4.0），已提交 8 个 commit（P0-1 sentinel/ P0-2 指纹/ P0-3 warmup/ P1-4/5 存活探活+RT恢复链/ P1-7 TOTP/ P1-8/9 think_time+TLS重试）；用户确认**合并协调**：它负责协议层 E1/E2/E5，本会话负责 P0 安全修复 + P1 一致性 | AskUserQuestion + git log |
 | 2026-08-12 | 提交 | 本会话 P0/P1 改动提交：`58df69d`（P0-3 串号+ P1 一致性+ P0 回归测试）、`61dd738`（P0-2 TLS 校验）；db UPSERT / register_engine 信号 / email verify 随并发会话提交入库 | git log |
 | 2026-08-12 | 验收 | 全量 pytest EXIT=0 通过（554 项，0 失败）；lastfailed 过时缓存已清（引用旧测试名，均已被并发会话改名） | /tmp/gpt_pytest_v2.txt |
+| 2026-08-12 | 独立审查 | 六维审查完成：**502 passed/0 failed**，两会话提交无冲突、无破坏性变更、交叉点全吻合。发现 **H1**（/accounts 泄露 totp_secret 明文）+ **M1**（success+空AT账号巡检恢复回退）+ **M2**（warmup 判据失真）+ **M3**（sentinel_quickjs 硬编码 zh-CN）+ L1-L6 | 审查线程报告 |
+| 2026-08-12 | 审查修复 | H1：`get_accounts` 返回剔除 totp_secret（等效 2FA 凭据）；M1：巡检空AT账号有RT直接走RT恢复。提交 `eae0e99` + 回归测试（H1×2 + M1×1） | git log + 测试 32 passed |
+| 2026-08-12 | 遗留（并发会话协议层） | M2 warmup 判据失真（换 IP 重试不触发）、M3 sentinel_quickjs zh-CN 硬编码与地理联动矛盾——归属并发会话协议层，建议其处理；L1-L6 低风险可缓 | 审查报告 |
+
+### 独立审查遗留问题清单（六维审查，base 29a3ce5..HEAD）
+- **H1（已修）** `/accounts` 泄露 totp_secret → `get_accounts` 剔除敏感列
+- **M1（已修）** success+空AT账号探活 unknown 不恢复 → 有 RT 直接走恢复链
+- **M2（待并发会话）** `protocol_register.py:535-541` warmup `_has_cookie` 判据被手动预置 cookie 污染，换 IP 重试不生效
+- **M3（待并发会话）** `sentinel_quickjs.py:139/:223` 请求头硬编码 zh-CN，与 P0-2 地理联动矛盾
+- **L1-L6** 低风险：L1 TOTP 仅协议路径 / L2 线程池固定并发 / L3 sdk 缓存非原子 / L4 读 sem 私有属性 / L5 sdk 版本硬编码 / L6 存活探活罕见误判
