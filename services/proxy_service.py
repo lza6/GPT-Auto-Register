@@ -283,15 +283,18 @@ class ProxyService:
 
         for entry in snapshot:
             line = entry["line"]
+            # v4.0.1：kookeey 动态住宅跳过健康检查——每次 get_next 生成随机 session=新出口 IP，
+            # 单次 TCP/HTTP 出口探测失败不代表该行坏；且 500 行可能共享同一凭据行
+            # （同一行复制 N 份，靠随机 session 变 IP），一条被 auto_cleanup 标黑 → 全池被锁。
+            # 实测 2026-08-12：auto_cleanup 误标一条 → get_next 全部返回 None。
+            if entry["type"] == "kookeey":
+                continue
             with self._lock:
                 # 跳过已在黑名单中的代理
                 if line in self._blacklist and time.time() < self._blacklist[line]["expires_at"]:
                     continue
-                # 构建代理 URL
-                if entry["type"] == "kookeey":
-                    proxy_url = self._kookeey_url(line)
-                else:
-                    proxy_url = self._http_url(line)
+                # 构建代理 URL（此处仅剩通用 http 代理）
+                proxy_url = self._http_url(line)
             if not proxy_url:
                 continue
 
