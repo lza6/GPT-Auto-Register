@@ -19,7 +19,7 @@ from api import proxies as proxies_router
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
 
 # 统一版本号（B19：所有地方引用此常量；P1-1：与 config.json version 保持一致）
-VERSION = "3.5.0"
+VERSION = "4.0.1"
 
 # 默认占位符视为「未配置」→ 不强制鉴权（兼容老部署），同时打日志提示
 DEFAULT_AUTH_PLACEHOLDERS = {"", "请修改为你的管理密钥", "change-me"}
