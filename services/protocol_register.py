@@ -376,11 +376,17 @@ class ProtocolRegister:
         # （_register_sync 开头 _fresh_fingerprint 选一次，线程局部贯穿全流程，不同账号不同指纹）。
         # v3.4 T80：注册专用线程池（由 register_engine 注入；None 时 run_in_executor 走默认池，向后兼容）。
         self._executor = None
+        # v4.0 P0-3：warmup 种 cookie（GET chatgpt.com 种 oai-did，防 authorize 409 invalid_state）
+        self._warmup_enabled = str(config.get("warmup_enabled", "true")).strip().lower() not in ("0", "false", "off", "no")
+        try:
+            self._warmup_retries = max(1, int(config.get("warmup_retries") or 2))
+        except (TypeError, ValueError):
+            self._warmup_retries = 2
         # 真实 sentinel SDK 求解（quickjs）：优先于合成 PoW，JS/PoW 失败自动降级合成。
         # 需要 node 可执行文件 + 脚本存在 + config.sentinel_quickjs 开启（默认开）。
         self._quickjs = False
         try:
-            qj = str(config.get("sentinel_quickjs") or "true").strip().lower()
+            qj = str(config.get("sentinel_quickjs", "true")).strip().lower()
             self._quickjs = qj not in ("0", "false", "off", "no") and node_available() and quickjs_script_available()
         except Exception:
             self._quickjs = False
@@ -431,6 +437,81 @@ class ProtocolRegister:
         if proxy_url:
             session.proxies = {"http": proxy_url, "https": proxy_url}
         return session
+
+    def _navigation_headers(self, ua: str = "", accept_lang: str = "", fingerprint: str = "") -> dict:
+        """整页导航型请求头（warmup/authorize 首次页面加载用）。
+
+        补 sec-fetch-* 全套 + Client Hints，让请求看起来像真实浏览器整页导航
+        （v4.0 P0-3：裸头自称 Chrome 却不带 sec-ch-ua，CF 一眼假）。
+        """
+        ch = self._sec_ch_ua(fingerprint)
+        return {
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "accept-language": accept_lang or "en-US,en;q=0.9",
+            "user-agent": ua or self.ua,
+            "upgrade-insecure-requests": "1",
+            "sec-fetch-dest": "document",
+            "sec-fetch-mode": "navigate",
+            "sec-fetch-site": "none",
+            "sec-fetch-user": "?1",
+            **ch,
+        }
+
+    def _sec_ch_ua(self, fingerprint: str = "") -> dict:
+        """从 TLS 指纹版本生成 sec-ch-ua 全套 Client Hints（指纹/UA/CH 自洽）。
+
+        not_a_brand 的品牌与版本随主版本严格配对（来自真实 Chrome UA-CH），
+        否则「UA 说 Chrome/136、sec-ch-ua 说 v=146」自相矛盾被 CF 一抓一个准。
+        """
+        import re
+        m = re.search(r"(\d+)", fingerprint or "")
+        ver = m.group(1) if m else "146"
+        not_brand_cfg = {136: ("Not.A/Brand", "99"), 142: ("Not/A)Brand", "8"), 146: ("Not?A_Brand", "99")}
+        nb, nb_ver = not_brand_cfg.get(int(ver), ("Not.A/Brand", "99"))
+        return {
+            "sec-ch-ua": f'"Chromium";v="{ver}", "Google Chrome";v="{ver}", "{nb}";v="{nb_ver}"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+        }
+
+    @staticmethod
+    def _has_cookie(session: Any, name: str) -> bool:
+        """检查 session cookie jar 是否含指定 cookie（容错：不支持 get 的 jar 视为未种上）。"""
+        try:
+            morsel = session.cookies.get(name)
+            return bool(morsel)
+        except Exception:
+            return False
+
+    def _warmup(self, ctx: RegistrationContext) -> bool:
+        """注册前预热：GET chatgpt.com 种 oai-did cookie，避免 authorize 409 invalid_state。
+
+        成功判据是 cookie jar 里有 oai-did，而非 HTTP 200（403 也返 200 形态）。
+        无 oai-did 时 authorize/continue 必 409 invalid_state（实测 5/5）。
+        失败换出口 IP（新 session = kookeey 新出口）重试；全部失败不阻塞，继续原 session。
+        全程容错，不抛异常（warmup 失败不拖累注册主流程）。
+        """
+        if not self._warmup_enabled:
+            return True
+        for _ in range(max(1, self._warmup_retries)):
+            try:
+                r = ctx.session.get(
+                    "https://chatgpt.com",
+                    headers=self._navigation_headers(ctx.fp_ua, ctx.geo_lang_full, ctx.fingerprint),
+                    timeout=20,
+                )
+                if self._has_cookie(ctx.session, "oai-did"):
+                    return True
+            except Exception:
+                pass
+            # 换出口 IP 重试
+            try:
+                ctx.session.close()
+            except Exception:
+                pass
+            ctx.proxy_url = self._resolve_proxy()
+            ctx.session = self._make_session(ctx.proxy_url, ctx.fingerprint)
+        return False
 
     def _sentinel_headers(self, session: Any, device_id: str, flow: str, ua: str = "",
                           lang: str = "", lang_full: str = "", timezone: str = "") -> dict:
@@ -609,14 +690,13 @@ class ProtocolRegister:
         """阶段 1：authorize，建立会话并识别账号形态。"""
         ctx.session = self._make_session(ctx.proxy_url, ctx.fingerprint)
         ctx.session.cookies.set("oai-did", ctx.device_id, domain=".auth.openai.com")
+        # v4.0 P0-3：warmup 种 oai-did cookie（无则 authorize/continue 409 invalid_state）。
+        # 预热失败不阻塞，authorize 若 409 会走 fallback_browser 降级。
+        self._warmup(ctx)
 
         r = ctx.session.get(
             _build_authorize_url(ctx.email, ctx.challenge),
-            headers={
-                "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                "user-agent": ctx.fp_ua,
-                "upgrade-insecure-requests": "1",
-            },
+            headers=self._navigation_headers(ctx.fp_ua, ctx.geo_lang_full, ctx.fingerprint),
             allow_redirects=True,
         )
         final = str(r.url)

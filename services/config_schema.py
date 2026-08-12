@@ -52,6 +52,9 @@ _CONFIG_SCHEMA: dict[str, tuple[tuple[type, ...], Any, bool]] = {
     # 真实 sentinel SDK 求解（v4.0）：Node vm 跑真实 sdk.js，防合成 PoW 被服务端深度校验识破
     # （邮件验证码 silent-drop）。无 node 或失败时自动降级合成 PoW。
     "sentinel_quickjs": ((bool, str), True, False),
+    # warmup 种 cookie（v4.0 P0-3）：注册前 GET chatgpt.com 种 oai-did，防 authorize 409
+    "warmup_enabled": ((bool, str), True, False),
+    "warmup_retries": ((int,), 2, False),
 }
 
 

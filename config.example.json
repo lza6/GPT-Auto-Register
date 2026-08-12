@@ -29,5 +29,7 @@
   "token_refresh_interval_sec": 21600,
   "cf_retry_max": 2,
   "tls_verify": true,
-  "sentinel_quickjs": true
+  "sentinel_quickjs": true,
+  "warmup_enabled": true,
+  "warmup_retries": 2
 }
