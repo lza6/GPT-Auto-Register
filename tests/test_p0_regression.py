@@ -197,3 +197,23 @@ class TestProxyConcurrency:
 
         assert not errors
         assert svc.blacklist_size() >= 1  # h1 已被标记
+
+
+# ── H1（审查）：totp_secret 不随账号列表泄露 ────────────────────────
+class TestTotpSecretNotLeaked:
+    def test_get_accounts_excludes_totp_secret(self, isolated_db):
+        """totp_secret 等效 2FA 凭据（sensitive_policy 已列敏感），不得经 /accounts 泄露。"""
+        db.insert_account("t@y.com", "p", "c", "rt", status="success", totp_secret="SECRET123")
+        accs = db.get_accounts(status="success")
+        assert len(accs) == 1
+        assert accs[0]["email"] == "t@y.com"
+        assert "totp_secret" not in accs[0]
+
+    def test_account_other_fields_intact(self, isolated_db):
+        """剔除敏感列不影响其余字段。"""
+        db.insert_account("u@y.com", "p", "c", "rt", status="success",
+                          openai_refresh_token="ort", access_token="at")
+        accs = db.get_accounts(search="u@y.com")
+        assert accs[0]["openai_refresh_token"] == "ort"
+        assert accs[0]["access_token"] == "at"
+        assert accs[0]["password"] == "p"

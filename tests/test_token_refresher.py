@@ -64,6 +64,24 @@ class TestScanProbeFirst:
         assert result["unknown"] == 1
         assert result["refreshed"] == 0
 
+    def test_success_missing_at_recovers_via_rt(self, isolated_db, monkeypatch):
+        """M1（审查）：success + 空 access_token 账号（探活 missing_access_token），
+        有 RT 时直接走 RT 恢复，不得被探活优先逻辑跳过。"""
+        _insert(email="m@x.com", access="", idt="", rt="ort1")  # 空 AT
+        r = _refresher()
+
+        async def fake_probe(acc, proxy_url=None):
+            return {"status": "unknown", "error": "missing_access_token"}
+
+        async def fake_recover(acc, proxy_url=None):
+            return True
+
+        monkeypatch.setattr(r, "_probe", fake_probe)
+        monkeypatch.setattr(r, "_recover_via_rt", fake_recover)
+        result = asyncio.run(r._scan_once())
+        assert result["refreshed"] == 1
+        assert result["unknown"] == 0
+
     def test_deactivated_terminal(self, isolated_db, monkeypatch):
         _insert()
         r = _refresher()

@@ -366,7 +366,14 @@ def get_accounts(status: str = "", limit: int = 0, offset: int = 0, search: str 
         params.extend([limit, offset])
     with db_session() as conn:
         rows = conn.execute(sql, params).fetchall()
-    return [dict(r) for r in rows]
+    result = []
+    for r in rows:
+        d = dict(r)
+        # H1（审查）：totp_secret 等效 2FA 凭据（sensitive_policy 已列为敏感），
+        # 不随 /accounts 列表与导出接口泄露。当前无活跃调用方需经 get_accounts 读该列。
+        d.pop("totp_secret", None)
+        result.append(d)
+    return result
 
 
 def count_accounts(status: str = "", search: str = "", failure_type: str = "") -> int:

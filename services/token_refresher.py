@@ -161,6 +161,16 @@ class TokenRefresher:
                         if status == "active":
                             result["active"] += 1
                             return
+                        # M1（审查）：success 但 access_token 为空的账号（历史遗留，注册成功未拿 AT），
+                        # 探活对空 AT 返回 unknown/missing_access_token；旧逻辑"有 RT 就刷新"能自动补，
+                        # 新逻辑（探活优先）若不处理则此类账号永远跳过。有 RT 时直接走 RT 恢复
+                        # （原 AT 为空，无覆盖风险）。
+                        if (liveness.get("error") or "") == "missing_access_token" and (acc.get("openai_refresh_token") or ""):
+                            if await self._recover_via_rt(acc, proxy_url):
+                                result["refreshed"] += 1
+                            else:
+                                result["failed"] += 1
+                            return
                         if status == "token_invalid":
                             # 永久停用账号终态化：不再浪费重试（仅统计+日志，保留现场）
                             low = (liveness.get("error") or "").lower()
