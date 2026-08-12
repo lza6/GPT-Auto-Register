@@ -18,8 +18,8 @@ from api import proxies as proxies_router
 
 CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
 
-# 统一版本号（B19：所有地方引用此常量）
-VERSION = "3.4.0"
+# 统一版本号（B19：所有地方引用此常量；P1-1：与 config.json version 保持一致）
+VERSION = "3.5.0"
 
 # 默认占位符视为「未配置」→ 不强制鉴权（兼容老部署），同时打日志提示
 DEFAULT_AUTH_PLACEHOLDERS = {"", "请修改为你的管理密钥", "change-me"}
@@ -185,16 +185,16 @@ def create_app() -> FastAPI:
         email_api_reachable = "unknown"
         try:
             import httpx
-            import asyncio
-            email_api_base = str(config.get("email_api_base", "") or "").strip()
-            if email_api_base:
-                probe_url = email_api_base.rstrip("/") + "/"
-                r = httpx.get(probe_url, timeout=5)
-                email_api_reachable = "ok" if r.status_code < 500 else "error"
-            else:
-                # 回退探测 Outlook 端点
-                r = httpx.get("https://outlook.live.com", timeout=5)
-                email_api_reachable = "ok" if r.status_code < 500 else "error"
+            async with httpx.AsyncClient(timeout=5) as _ac:
+                email_api_base = str(config.get("email_api_base", "") or "").strip()
+                if email_api_base:
+                    probe_url = email_api_base.rstrip("/") + "/"
+                    r = await _ac.get(probe_url)
+                    email_api_reachable = "ok" if r.status_code < 500 else "error"
+                else:
+                    # 回退探测 Outlook 端点
+                    r = await _ac.get("https://outlook.live.com")
+                    email_api_reachable = "ok" if r.status_code < 500 else "error"
         except Exception:
             email_api_reachable = "unreachable"
 
@@ -269,6 +269,15 @@ def create_app() -> FastAPI:
             log.info("shutdown: 代理池自动清理已停止")
         except Exception as e:
             log.warning(f"shutdown: 代理池自动清理停止异常: {e}")
+
+        # T80：关闭注册引擎有界线程池（协议注册专用）
+        try:
+            from services.register_engine import register_engine
+            if register_engine is not None and getattr(register_engine, "_executor", None) is not None:
+                register_engine._executor.shutdown(wait=False)
+                log.info("shutdown: 注册引擎线程池已关闭")
+        except Exception as e:
+            log.warning(f"shutdown: 注册引擎线程池关闭异常: {e}")
 
     # token 保鲜巡检：startup 事件（async 上下文）内启动后台任务（v3.0 G1）
     # 注意：不能在 create_app 同步执行，create_task 需 running event loop

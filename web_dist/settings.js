@@ -47,7 +47,7 @@ export async function saveSettings() {
     settings.push({ key: 'protocol_first', value: document.getElementById('cfgProtocolFirst').checked ? 'true' : 'false' });
     settings.push({ key: 'use_browser', value: document.getElementById('cfgUseBrowser').checked ? 'true' : 'false' });
     for (const s of settings) await api('/settings/', { method: 'POST', body: JSON.stringify(s) });
-    toast('设置已保存');
+    toast('设置已保存，重启后生效');
   } catch (e) { toastMsg('保存失败: ' + e.message, 'error'); }
 }
 

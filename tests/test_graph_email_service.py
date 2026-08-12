@@ -58,8 +58,8 @@ class TestTokenCache:
         svc = g.GraphEmailService()
         fake = FakeAsyncClient()
         monkeypatch.setattr(g.httpx, "AsyncClient", lambda *a, **k: fake)
-        # 塞入已过期条目（expire_time - 60 < now）
-        svc._token_cache["cid1"] = ("old-token", time.time() - 10)
+        # 塞入已过期条目（expire_time - 60 < now）；key 为复合 key（cid:rt）
+        svc._token_cache["cid1:rt"] = ("old-token", time.time() - 10)
         token = await svc._get_access_token("cid1", "rt")
         assert token == "tok"
         assert fake.calls == 1  # 过期后重新请求
@@ -71,8 +71,8 @@ class TestTokenCache:
         for i in range(svc.MAX_CACHE_ENTRIES + 10):
             await svc._get_access_token(f"cid{i}", f"rt{i}")
         assert len(svc._token_cache) <= svc.MAX_CACHE_ENTRIES
-        # 最旧应被逐出：cid0 不在缓存中
-        assert "cid0" not in svc._token_cache
+        # 最旧应被逐出：cid0:rt0 不在缓存中
+        assert "cid0:rt0" not in svc._token_cache
 
     async def test_used_key_moved_to_end_on_hit(self, monkeypatch):
         svc = g.GraphEmailService()
@@ -80,9 +80,9 @@ class TestTokenCache:
         monkeypatch.setattr(g.httpx, "AsyncClient", lambda *a, **k: fake)
         for i in range(svc.MAX_CACHE_ENTRIES):
             await svc._get_access_token(f"cid{i}", f"rt{i}")
-        # 命中 cid0（最旧），LRU 应把它移到末尾
+        # 命中 cid0:rt0（最旧），LRU 应把它移到末尾
         await svc._get_access_token("cid0", "rt0")
-        assert next(reversed(svc._token_cache)) == "cid0"
+        assert next(reversed(svc._token_cache)) == "cid0:rt0"
 
 
 class TestOtpExtract:

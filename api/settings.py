@@ -109,7 +109,9 @@ async def update_setting(req: SettingsUpdateRequest) -> dict:
         config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     config[key] = coerced
     CONFIG_PATH.write_text(json.dumps(config, indent=2, ensure_ascii=False), encoding="utf-8")
-    return {"success": True}
+    # P1-4：明确告知运行时单例仍用旧值（get_engine/get_protocol_register 等创建一次快照，需重启生效）
+    return {"success": True, "restart_required": True,
+            "message": "配置已保存，需重启服务后生效（运行中的引擎/巡检仍用旧值）"}
 
 
 @router.get("/config", summary="获取 config.json", description="返回原始 config.json 内容（敏感字段已掩码）。")

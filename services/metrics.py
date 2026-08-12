@@ -75,17 +75,21 @@ def _refresh_system_gauges() -> None:
         from services.register_engine import register_engine
         if register_engine is not None:
             engine_running.set(1 if register_engine.is_running else 0)
-            # 并发度：从引擎获取当前活跃槽位数
-            concurrency = getattr(register_engine, "_current_concurrency", None) or 0
-            engine_concurrency.set(concurrency)
+            # 并发度：活跃槽位 = 并发上限 - sem 剩余许可（P1-2 修复死引用：原读不存在的 _current_concurrency 恒 0）
+            sem = getattr(register_engine, "_active_sem", None)
+            conc_limit = getattr(register_engine, "_concurrency", 0)
+            if sem is not None and conc_limit > 0:
+                active = max(0, conc_limit - sem._value)
+            else:
+                active = 0
+            engine_concurrency.set(active)
     except Exception:
         pass
     # 刷新代理池大小
     try:
         from services.proxy_service import proxy_service
         if proxy_service is not None:
-            pool = getattr(proxy_service, "_pool", None) or getattr(proxy_service, "proxies", None) or []
-            proxy_pool_size.set(len(pool) if isinstance(pool, (list, set)) else 0)
+            proxy_pool_size.set(proxy_service.count)  # P1-2 修复死引用：原读不存在的 _pool/proxies 恒 0
     except Exception:
         pass
     # 刷新 VACUUM 时间戳

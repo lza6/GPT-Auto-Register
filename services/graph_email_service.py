@@ -36,7 +36,9 @@ class GraphEmailService:
 
     async def _get_access_token(self, client_id: str, refresh_token: str) -> str | None:
         """用 refresh_token 获取 access_token（带 LRU 缓存）"""
-        cache_key = client_id
+        # 复合 key：同 client_id 下不同邮箱（不同 refresh_token）对应不同用户，
+        # 只取 client_id 会让第二个邮箱复用第一个的 access_token 读别人的收件箱（P0-3 串号修复）。
+        cache_key = f"{client_id}:{refresh_token}"
         if cache_key in self._token_cache:
             token, expire_time = self._token_cache[cache_key]
             if time.time() < expire_time - 60:
