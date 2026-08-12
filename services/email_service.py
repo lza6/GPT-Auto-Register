@@ -137,7 +137,7 @@ class EmailService:
     async def get_email_list(self, email: str, password: str, client_id: str,
                              refresh_token: str, folder: str = "inbox") -> list[dict]:
         """调用 98faka API 获取邮件列表"""
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=30, verify=_tls_verify()) as client:
             resp = await client.post(
                 f"{self.api_base}/api/emails",
                 json={
@@ -157,7 +157,7 @@ class EmailService:
     async def get_email_body(self, email: str, message_id: str, client_id: str,
                              refresh_token: str) -> str:
         """调用 98faka API 获取邮件正文"""
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=30, verify=_tls_verify()) as client:
             resp = await client.post(
                 f"{self.api_base}/api/email-body",
                 json={
