@@ -130,16 +130,18 @@ class TokenRefresher:
             return self._last_result
         self._scanning = True
         try:
-            # 取所有有 refresh_token 的 success 账号
+            # 取所有 success 账号（v4.0 P1-4：探活优先，active 跳过刷新省配额）
             with db_session() as conn:
                 rows = conn.execute(
-                    "SELECT email, openai_refresh_token FROM accounts "
-                    "WHERE status = 'success' AND openai_refresh_token != ''"
+                    "SELECT email, openai_refresh_token, access_token, id_token FROM accounts "
+                    "WHERE status = 'success'"
                 ).fetchall()
             accounts = [dict(r) for r in rows]
             self._last_scan_at = time.time()
             # v3.4：用局部 dict 统计，gather 结束一次性赋值，消除并发 += 共享 _last_result 的竞态
-            result = {"scanned": len(accounts), "refreshed": 0, "failed": 0}
+            # v4.0 P1-4：active=健康跳过；unknown=403/429/传输失败不误判；deactivated=永久停用
+            result = {"scanned": len(accounts), "refreshed": 0, "failed": 0,
+                      "active": 0, "unknown": 0, "deactivated": 0}
 
             if not accounts:
                 add_log("info", "token 巡检：无 success 账号可扫描")
@@ -148,25 +150,42 @@ class TokenRefresher:
 
             sem = asyncio.Semaphore(self._concurrency)
 
-            async def refresh_one(acc: dict) -> None:
+            async def probe_one(acc: dict) -> None:
                 async with sem:
                     try:
-                        tokens = await self._refresh_token(acc["openai_refresh_token"])
-                        if tokens and tokens.get("access_token"):
-                            # 同时落库新 access_token 与轮换后的新 refresh_token（否则库存 RT 会逐步耗尽）
-                            self._update_tokens(acc["email"], tokens["access_token"], tokens.get("refresh_token", ""))
-                            result["refreshed"] += 1
-                        else:
-                            result["failed"] += 1
+                        proxy_url = self._resolve_proxy()  # 一次解析，探活+恢复共用同出口
+                        liveness = await self._probe(acc, proxy_url)
+                        status = liveness.get("status")
+                        email = acc["email"]
+                        if status == "active":
+                            result["active"] += 1
+                            return
+                        if status == "token_invalid":
+                            # 永久停用账号终态化：不再浪费重试（仅统计+日志，保留现场）
+                            low = (liveness.get("error") or "").lower()
+                            if any(k in low for k in ("account_deactivated", "deleted or deactivated")):
+                                result["deactivated"] += 1
+                                add_log("warning", f"token 巡检 [{email}] 账号已停用（终态），不再重试")
+                                return
+                            if await self._recover_via_rt(acc, proxy_url):
+                                result["refreshed"] += 1
+                            else:
+                                result["failed"] += 1
+                            return
+                        # unknown：403/429/传输失败，不误判 AT 失效，留待复查
+                        result["unknown"] += 1
+                        if liveness.get("error"):
+                            add_log("debug", f"token 巡检 [{email}] 探活 unknown: {liveness['error'][:120]}")
                     except Exception as e:
                         add_log("warning", f"token 巡检 [{acc['email']}] 异常: {e}")
-                        result["failed"] += 1
+                        result["unknown"] += 1
 
-            await asyncio.gather(*(refresh_one(a) for a in accounts))
+            await asyncio.gather(*(probe_one(a) for a in accounts))
             self._last_result = result
             add_log("info",
-                    f"token 巡检完成：扫描 {result['scanned']}，"
-                    f"刷新 {result['refreshed']}，失败 {result['failed']}")
+                    f"token 巡检完成：扫描 {result['scanned']}，健康 {result['active']}，"
+                    f"刷新 {result['refreshed']}，失败 {result['failed']}，"
+                    f"未知 {result['unknown']}，停用 {result['deactivated']}")
             return result
         finally:
             self._scanning = False
@@ -187,6 +206,46 @@ class TokenRefresher:
         except Exception:
             pass
         return None
+
+    async def _probe(self, acc: dict, proxy_url: str | None = None) -> dict:
+        """探活账号 AT（三态：active/token_invalid/unknown）。"""
+        from services.account_liveness import probe_access_token
+        return await probe_access_token(
+            acc.get("access_token", ""),
+            id_token=acc.get("id_token", ""),
+            proxy=proxy_url,
+            verify=tls_verify_enabled(self._config),
+        )
+
+    async def _recover_via_rt(self, acc: dict, proxy_url: str | None = None) -> bool:
+        """AT 失效恢复链（第一级）：refresh_token 换新 AT → 二次探活确认 active → 落盘。
+
+        换到的新 AT 必须先二次探活返回 active 才写库，防止坏 token 覆盖好 token
+        （GPT-Register-Tool account_recovery 的 _verify_and_persist_candidate 同口径）。
+        """
+        rt = acc.get("openai_refresh_token") or ""
+        if not rt:
+            add_log("warning", f"token 巡检 [{acc['email']}] AT 失效但无 refresh_token，无法恢复")
+            return False
+        tokens = await self._refresh_token(rt)
+        if not tokens or not tokens.get("access_token"):
+            add_log("warning", f"token 巡检 [{acc['email']}] RT 恢复失败（刷新未返回 AT）")
+            return False
+        from services.account_liveness import probe_access_token
+        confirm = await probe_access_token(
+            tokens["access_token"],
+            id_token=tokens.get("id_token", ""),
+            proxy=proxy_url,
+            verify=tls_verify_enabled(self._config),
+        )
+        if confirm.get("status") != "active":
+            add_log("warning",
+                    f"token 巡检 [{acc['email']}] 恢复后探活未确认 active"
+                    f"（{confirm.get('status')}），不落盘")
+            return False
+        # 同时落库新 access_token 与轮换后的新 refresh_token（否则库存 RT 会逐步耗尽）
+        self._update_tokens(acc["email"], tokens["access_token"], tokens.get("refresh_token", ""))
+        return True
 
     async def _refresh_token(self, refresh_token: str) -> dict | None:
         """用 refresh_token 换新三件套（可被测试 monkeypatch）。走配置代理。
