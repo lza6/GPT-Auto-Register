@@ -118,6 +118,11 @@ def init_db() -> None:
             conn.execute("ALTER TABLE accounts ADD COLUMN failure_type TEXT DEFAULT ''")
         except Exception:
             pass
+        # 迁移（v4.0 P1-7）：accounts 补 totp_secret 列（TOTP 2FA secret，一次性下发需即时落库）
+        try:
+            conn.execute("ALTER TABLE accounts ADD COLUMN totp_secret TEXT")
+        except Exception:
+            pass
         # 迁移（v3.3 多平台邮箱库）：emails/accounts 补 platform 字段，标记邮箱用于哪个平台注册。
         # 默认 'chatgpt'（现有数据）。后续扩展 grok/claude 等平台自动化注册时按 platform 区分，
         # 同一邮箱可在不同平台各注册一次（跨平台去重），同平台内 email 唯一防重复注册。
@@ -307,15 +312,35 @@ def insert_account(email: str, password: str, client_id: str, refresh_token: str
                    access_token: str = "", name: str = "", birthdate: str = "",
                    proxy: str = "", status: str = "pending", error: str = "",
                    openai_refresh_token: str = "", id_token: str = "",
-                   openai_password: str = "", failure_type: str = "") -> None:
+                   openai_password: str = "", failure_type: str = "",
+                   totp_secret: str = "") -> None:
     with db_session() as conn:
+        # P0-4：INSERT OR REPLACE → UPSERT。重试注册同一 email 时保留原 id/created_at，
+        # 不再整行删除重建（避免自增 id 变化破坏 platform_usage 等外部引用、时间戳被重置）。
+        # totp_secret 用 NULLIF/COALESCE 保留旧值：重试没绑 2FA 时不覆盖已绑的 secret。
         conn.execute(
-            """INSERT OR REPLACE INTO accounts
-               (email, password, client_id, refresh_token, access_token, openai_refresh_token, id_token, openai_password, name, birthdate, proxy, status, error, registered_at, failure_type)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO accounts
+               (email, password, client_id, refresh_token, access_token, openai_refresh_token, id_token, openai_password, name, birthdate, proxy, status, error, registered_at, failure_type, totp_secret)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(email) DO UPDATE SET
+                 password=excluded.password,
+                 client_id=excluded.client_id,
+                 refresh_token=excluded.refresh_token,
+                 access_token=excluded.access_token,
+                 openai_refresh_token=excluded.openai_refresh_token,
+                 id_token=excluded.id_token,
+                 openai_password=excluded.openai_password,
+                 name=excluded.name,
+                 birthdate=excluded.birthdate,
+                 proxy=excluded.proxy,
+                 status=excluded.status,
+                 error=excluded.error,
+                 registered_at=COALESCE(excluded.registered_at, accounts.registered_at),
+                 failure_type=excluded.failure_type,
+                 totp_secret=COALESCE(NULLIF(excluded.totp_secret, ''), accounts.totp_secret)""",
             (email, password, client_id, refresh_token, access_token, openai_refresh_token, id_token,
              openai_password, name, birthdate, proxy, status, error,
-             time.time() if status == 'success' else None, failure_type),
+             time.time() if status == 'success' else None, failure_type, totp_secret),
         )
 
 

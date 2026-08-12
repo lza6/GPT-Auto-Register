@@ -55,6 +55,8 @@ _CONFIG_SCHEMA: dict[str, tuple[tuple[type, ...], Any, bool]] = {
     # warmup 种 cookie（v4.0 P0-3）：注册前 GET chatgpt.com 种 oai-did，防 authorize 409
     "warmup_enabled": ((bool, str), True, False),
     "warmup_retries": ((int,), 2, False),
+    # 注册成功后自动绑 TOTP 2FA（v4.0 P1-7）：同会话快路径，失败不阻塞注册成功
+    "totp_enabled": ((bool, str), True, False),
 }
 
 

@@ -4,6 +4,7 @@ import asyncio
 import json
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from services.db import add_log, insert_account, mark_email_status, get_accounts, update_task_progress, get_task
@@ -50,6 +51,14 @@ class RegisterEngine:
         self._pause_event = asyncio.Event()
         self._pause_event.set()
         self._trace_id = ""
+        # P1-2：metrics 活跃槽位信号（run_batch 设置 sem 后读取并发持有数，修复死引用恒 0）
+        self._active_sem: asyncio.Semaphore | None = None
+        self._concurrency: int = 0
+        # T80：注册专用有界线程池（协议注册用，大小=并发数，防同步注册占用默认线程池）
+        self._executor = ThreadPoolExecutor(
+            max_workers=max(1, _as_int(config.get("register_concurrency"), 1)),
+            thread_name_prefix="proto-reg",
+        )
 
     @property
     def is_running(self) -> bool:
@@ -115,6 +124,8 @@ class RegisterEngine:
         if protocol_first:
             from services.protocol_register import get_protocol_register
             protocol_reg = get_protocol_register(self.config)
+            # T80：注入注册专用有界线程池（同步协议注册在受控线程池执行，不用默认池）
+            protocol_reg._executor = self._executor
             result = await protocol_reg.register_one(email, password, client_id, refresh_token)
             if result["status"] == "success":
                 return result
@@ -182,6 +193,8 @@ class RegisterEngine:
         success_emails = {a["email"] for a in get_accounts(status="success")}
         stats_lock = asyncio.Lock()
         sem = asyncio.Semaphore(concurrency)
+        self._active_sem = sem  # P1-2：暴露给 metrics 读活跃槽位
+        self._concurrency = concurrency
         stopped = {"flag": False}
         # v3.0 A4A6：失败分级自适应状态
         # server_5xx 连续计数：连续 3 次自动暂停 60s 后恢复
@@ -257,6 +270,7 @@ class RegisterEngine:
                             access_token=result["access_token"],
                             name=result["name"], birthdate=result["birthdate"],
                             proxy=result["proxy"], status="success",
+                            totp_secret=result.get("totp_secret", ""),
                         )
                         stats["completed"] += 1
                         mark_email_status(email, "used")
@@ -375,6 +389,7 @@ class RegisterEngine:
             # 后续 /start 永远被「已在运行中」拒绝（v3.1 审计修复）
             self._running = False
             self._starting = False
+            self._active_sem = None  # P1-2：批次结束清理并发信号
             engine_running.set(0)
             engine_queue_depth.set(0)
 

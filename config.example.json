@@ -31,5 +31,6 @@
   "tls_verify": true,
   "sentinel_quickjs": true,
   "warmup_enabled": true,
-  "warmup_retries": 2
+  "warmup_retries": 2,
+  "totp_enabled": true
 }

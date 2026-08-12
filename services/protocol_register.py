@@ -376,6 +376,8 @@ class ProtocolRegister:
         # （_register_sync 开头 _fresh_fingerprint 选一次，线程局部贯穿全流程，不同账号不同指纹）。
         # v3.4 T80：注册专用线程池（由 register_engine 注入；None 时 run_in_executor 走默认池，向后兼容）。
         self._executor = None
+        # v4.0 P1-7：注册成功后自动绑 TOTP 2FA（快路径，同会话；失败不阻塞注册成功）
+        self._totp_enabled = str(config.get("totp_enabled", "true")).strip().lower() not in ("0", "false", "off", "no")
         # v4.0 P0-3：warmup 种 cookie（GET chatgpt.com 种 oai-did，防 authorize 409 invalid_state）
         self._warmup_enabled = str(config.get("warmup_enabled", "true")).strip().lower() not in ("0", "false", "off", "no")
         try:
@@ -833,6 +835,18 @@ class ProtocolRegister:
 
         ctx.result.update(tokens)
         ctx.result["openai_password"] = ctx.openai_password
+        # v4.0 P1-7：注册成功后自动绑 TOTP 2FA（快路径：同 session + AT，零 PoW 零邮件）。
+        # secret 仅 enroll 响应下发一次、服务端取不回，拿到立即随 result 落库。
+        # 失败不阻塞注册成功（2FA 只是加固，账号已注册好）。
+        if self._totp_enabled:
+            try:
+                from services.two_factor_service import enroll_totp
+                tfa = enroll_totp(ctx.session, tokens.get("access_token", ""), ua=ctx.fp_ua)
+                if tfa:
+                    ctx.result["totp_secret"] = tfa["secret"]
+                    logger.info("TOTP 2FA 绑定成功 (email=%s)", ctx.email)
+            except Exception as e:
+                logger.warning("TOTP 2FA 绑定失败（不阻塞注册成功）: %s", e)
         ctx.result["status"] = "success"
         return RegistrationState.COMPLETED
 
