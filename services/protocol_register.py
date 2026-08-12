@@ -51,6 +51,7 @@ from services.constants import (
     OAUTH_AUTH0_CLIENT as AUTH0_CLIENT,
     OAUTH_ISSUER as AUTH_BASE,
     tls_verify_enabled,
+    country_locale,
 )
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -292,6 +293,11 @@ class RegistrationContext:
     flow_kind: str = ""          # "create-account" 或 "log-in"
     result: dict = field(default_factory=dict)  # 累积结果字典
     state_machine: RegistrationStateMachine = field(default_factory=RegistrationStateMachine)
+    # v4.0 P0-2：指纹地理联动——按出口 IP 国家生成的浏览器画像
+    geo_country: str = "US"
+    geo_lang: str = "en-US"          # 主语言（如 ja-JP）
+    geo_lang_full: str = "en-US,en;q=0.9"  # Accept-Language 全量
+    geo_timezone: str = "America/New_York"  # IANA 时区
 
 
 # ── 工具函数 ──────────────────────────────────────────
@@ -426,11 +432,13 @@ class ProtocolRegister:
             session.proxies = {"http": proxy_url, "https": proxy_url}
         return session
 
-    def _sentinel_headers(self, session: Any, device_id: str, flow: str, ua: str = "") -> dict:
+    def _sentinel_headers(self, session: Any, device_id: str, flow: str, ua: str = "",
+                          lang: str = "", lang_full: str = "", timezone: str = "") -> dict:
         """生成 sentinel 请求头。
 
         quickjs（真实 sdk.js）优先：sdk_token 直接作为 openai-sentinel-token，
         so_token 放 openai-sentinel-so-token（服务端要求时）。
+        语言/时区等浏览器画像传给 sdk.js 的 navigator，保持与 UA 一致（v4.0 P0-2）。
         链路级网络/TLS 瞬断（QuickJSNetworkError）上抛——它是可恢复的网络问题，
         走上层 network 分类/降级，而不是降级合成（合成照样过不了服务端深度校验）。
         其余 JS/PoW 失败自动降级合成 PoW（开发环境无 node 时也能跑）。
@@ -439,6 +447,7 @@ class ProtocolRegister:
             try:
                 res = get_sentinel_token_via_quickjs(
                     session, device_id, flow=flow, user_agent=ua or self.ua,
+                    lang=lang or "", lang_full=lang_full or "", timezone=timezone or "",
                 )
                 if res:
                     sdk_token, so_token = res
@@ -457,10 +466,12 @@ class ProtocolRegister:
             session.cookies.set("oai-sc", oai_sc, domain=".openai.com")
         return {"openai-sentinel-token": sentinel}
 
-    def _base_headers(self, referer: str, device_id: str, ua: str = "") -> dict:
+    def _base_headers(self, referer: str, device_id: str, ua: str = "", accept_lang: str = "") -> dict:
+        # v4.0 P0-2：Accept-Language 跟随出口 IP 国家（不硬编码 zh-CN，
+        # 否则「IP 美国、语言中文」是批量注册的明显异常信号）
         return {
             "accept": "application/json",
-            "accept-language": "zh-CN,zh;q=0.9",
+            "accept-language": accept_lang or "en-US,en;q=0.9",
             "content-type": "application/json",
             "referer": referer,
             "user-agent": ua or self.ua,
@@ -630,8 +641,9 @@ class ProtocolRegister:
     def _stage_user_register(self, ctx: RegistrationContext) -> RegistrationState:
         """阶段 2a：create-account — 设密码。"""
         ctx.openai_password = gen_password()
-        h = self._base_headers(f"{AUTH_BASE}/create-account/password", ctx.device_id, ctx.fp_ua)
-        h.update(self._sentinel_headers(ctx.session, ctx.device_id, FLOW_REGISTER, ctx.fp_ua))
+        h = self._base_headers(f"{AUTH_BASE}/create-account/password", ctx.device_id, ctx.fp_ua, ctx.geo_lang_full)
+        h.update(self._sentinel_headers(ctx.session, ctx.device_id, FLOW_REGISTER, ctx.fp_ua,
+                                        ctx.geo_lang, ctx.geo_lang_full, ctx.geo_timezone))
         r2 = ctx.session.post(f"{AUTH_BASE}/api/accounts/user/register",
                               json={"password": ctx.openai_password, "username": ctx.email},
                               headers=h)
@@ -649,7 +661,7 @@ class ProtocolRegister:
                                  allow_redirects=False,
                                  headers=self._base_headers(
                                      f"{AUTH_BASE}/create-account/password",
-                                     ctx.device_id, ctx.fp_ua,
+                                     ctx.device_id, ctx.fp_ua, ctx.geo_lang_full,
                                  ))
         if r_send.status_code != 200:
             ctx.result["error"] = f"email-otp/send HTTP {r_send.status_code}"
@@ -662,7 +674,7 @@ class ProtocolRegister:
         """阶段 2c：log-in — passwordless 触发 OTP。"""
         ctx.otp_trigger = dt.datetime.now()
         try:
-            h = self._base_headers(f"{AUTH_BASE}/log-in/password", ctx.device_id, ctx.fp_ua)
+            h = self._base_headers(f"{AUTH_BASE}/log-in/password", ctx.device_id, ctx.fp_ua, ctx.geo_lang_full)
             r2 = ctx.session.post(f"{AUTH_BASE}/api/accounts/passwordless/send-otp",
                                   json={"username": ctx.email}, headers=h)
             if r2.status_code != 200:
@@ -690,8 +702,9 @@ class ProtocolRegister:
 
     def _stage_email_otp_validate(self, ctx: RegistrationContext) -> RegistrationState:
         """阶段 4：email-otp/validate。"""
-        h = self._base_headers(f"{AUTH_BASE}/email-verification", ctx.device_id, ctx.fp_ua)
-        h.update(self._sentinel_headers(ctx.session, ctx.device_id, FLOW_OTP, ctx.fp_ua))
+        h = self._base_headers(f"{AUTH_BASE}/email-verification", ctx.device_id, ctx.fp_ua, ctx.geo_lang_full)
+        h.update(self._sentinel_headers(ctx.session, ctx.device_id, FLOW_OTP, ctx.fp_ua,
+                                        ctx.geo_lang, ctx.geo_lang_full, ctx.geo_timezone))
         r3 = ctx.session.post(f"{AUTH_BASE}/api/accounts/email-otp/validate",
                               json={"code": ctx.otp_code}, headers=h)
         j3 = r3.json() if r3.text else {}
@@ -707,8 +720,9 @@ class ProtocolRegister:
 
     def _stage_create_account(self, ctx: RegistrationContext) -> RegistrationState:
         """阶段 5：about-you → create_account。"""
-        h = self._base_headers(f"{AUTH_BASE}/about-you", ctx.device_id, ctx.fp_ua)
-        h.update(self._sentinel_headers(ctx.session, ctx.device_id, FLOW_CREATE, ctx.fp_ua))
+        h = self._base_headers(f"{AUTH_BASE}/about-you", ctx.device_id, ctx.fp_ua, ctx.geo_lang_full)
+        h.update(self._sentinel_headers(ctx.session, ctx.device_id, FLOW_CREATE, ctx.fp_ua,
+                                        ctx.geo_lang, ctx.geo_lang_full, ctx.geo_timezone))
         r4 = ctx.session.post(f"{AUTH_BASE}/api/accounts/create_account",
                               json={"name": ctx.name, "birthdate": ctx.birthdate}, headers=h)
         j4 = r4.json() if r4.text else {}
@@ -753,6 +767,13 @@ class ProtocolRegister:
         # 每账号解析一次出口代理并贯穿全流程（authorize/取码/换 token 同一出口 IP，
         # 防中途换 IP 触发风控）；kookeey 动态住宅每账号新 IP。
         proxy_url = self._resolve_proxy()
+        # v4.0 P0-2：指纹地理联动——按出口 IP 国家生成语言/时区画像。
+        # config.geo_country 显式覆盖；否则读 kookeey 代理行的国家（get_next 已更新 last_country）。
+        geo_country = str(self.config.get("geo_country") or "").strip()
+        if not geo_country and proxy_url:
+            from services.proxy_service import proxy_service as _ps
+            geo_country = _ps.last_country
+        geo = country_locale(geo_country or "US")
         # 一账号一指纹：本账号选一次 TLS 指纹 + 配套 UA，贯穿全流程（authorize/取码/换token），
         # 不同账号不同指纹（配合每账号独立 IP → 一账号一指纹一 IP，网络层+传输层双隔离）。
         fingerprint, fp_ua = self._fresh_fingerprint()
@@ -790,6 +811,10 @@ class ProtocolRegister:
             name=name,
             birthdate=birthdate,
             result=result,
+            geo_country=str(geo_country or "US"),
+            geo_lang=geo["lang"],
+            geo_lang_full=geo["lang_full"],
+            geo_timezone=geo["timezone"],
         )
 
         # 状态机阶段映射

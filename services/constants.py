@@ -95,3 +95,64 @@ def ua_for_fingerprint(fingerprint: str) -> str:
         return _UA_BY_FAMILY["edge"].format(ver=ver)
     # 默认 chrome（含 chrome131_android 等，UA 仍用桌面 Chrome 即可——指纹是 TLS 层）
     return _UA_BY_FAMILY["chrome"].format(ver=ver)
+
+
+# ── IP 地理 → 语言/时区联动（v4.0 P0-2）────────────────────────
+# 代理出口国家 → (主语言, Accept-Language 全量 q 值, IANA 时区)
+# 原则：IP 在哪个国家，浏览器就说什么语言、时区指向该国家城市。
+# 否则「出口 IP 是美/日/新加坡，Accept-Language 却是 zh-CN」是明显异常信号，
+# Cloudflare/OpenAI 一眼识别批量注册。
+# 常见代理国家（kookeey 国家码为 2 位大写），缺失回退 en-US。
+COUNTRY_LOCALE: dict[str, dict[str, str]] = {
+    "US": {"lang": "en-US", "lang_full": "en-US,en;q=0.9", "timezone": "America/New_York"},
+    "CA": {"lang": "en-CA", "lang_full": "en-CA,en;q=0.9,fr-CA;q=0.8", "timezone": "America/Toronto"},
+    "GB": {"lang": "en-GB", "lang_full": "en-GB,en;q=0.9", "timezone": "Europe/London"},
+    "DE": {"lang": "de-DE", "lang_full": "de-DE,de;q=0.9,en;q=0.8", "timezone": "Europe/Berlin"},
+    "FR": {"lang": "fr-FR", "lang_full": "fr-FR,fr;q=0.9,en;q=0.8", "timezone": "Europe/Paris"},
+    "JP": {"lang": "ja-JP", "lang_full": "ja-JP,ja;q=0.9,en;q=0.8", "timezone": "Asia/Tokyo"},
+    "SG": {"lang": "en-SG", "lang_full": "en-SG,en;q=0.9,zh-SG;q=0.8", "timezone": "Asia/Singapore"},
+    "AU": {"lang": "en-AU", "lang_full": "en-AU,en;q=0.9", "timezone": "Australia/Sydney"},
+    "NL": {"lang": "nl-NL", "lang_full": "nl-NL,nl;q=0.9,en;q=0.8", "timezone": "Europe/Amsterdam"},
+    "IT": {"lang": "it-IT", "lang_full": "it-IT,it;q=0.9,en;q=0.8", "timezone": "Europe/Rome"},
+    "ES": {"lang": "es-ES", "lang_full": "es-ES,es;q=0.9,en;q=0.8", "timezone": "Europe/Madrid"},
+    "BR": {"lang": "pt-BR", "lang_full": "pt-BR,pt;q=0.9,en;q=0.8", "timezone": "America/Sao_Paulo"},
+    "KR": {"lang": "ko-KR", "lang_full": "ko-KR,ko;q=0.9,en;q=0.8", "timezone": "Asia/Seoul"},
+    "IN": {"lang": "en-IN", "lang_full": "en-IN,en;q=0.9,hi;q=0.8", "timezone": "Asia/Kolkata"},
+    "TR": {"lang": "tr-TR", "lang_full": "tr-TR,tr;q=0.9,en;q=0.8", "timezone": "Europe/Istanbul"},
+    "HK": {"lang": "zh-HK", "lang_full": "zh-HK,zh;q=0.9,en;q=0.8", "timezone": "Asia/Hong_Kong"},
+    "TW": {"lang": "zh-TW", "lang_full": "zh-TW,zh;q=0.9,en;q=0.8", "timezone": "Asia/Taipei"},
+    "ID": {"lang": "id-ID", "lang_full": "id-ID,id;q=0.9,en;q=0.8", "timezone": "Asia/Jakarta"},
+    "MY": {"lang": "ms-MY", "lang_full": "ms-MY,ms;q=0.9,en;q=0.8", "timezone": "Asia/Kuala_Lumpur"},
+    "VN": {"lang": "vi-VN", "lang_full": "vi-VN,vi;q=0.9,en;q=0.8", "timezone": "Asia/Ho_Chi_Minh"},
+    "TH": {"lang": "th-TH", "lang_full": "th-TH,th;q=0.9,en;q=0.8", "timezone": "Asia/Bangkok"},
+    "PH": {"lang": "en-PH", "lang_full": "en-PH,en;q=0.9,fil;q=0.8", "timezone": "Asia/Manila"},
+    "CH": {"lang": "de-CH", "lang_full": "de-CH,de;q=0.9,fr-CH;q=0.8,it-CH;q=0.7", "timezone": "Europe/Zurich"},
+    "PL": {"lang": "pl-PL", "lang_full": "pl-PL,pl;q=0.9,en;q=0.8", "timezone": "Europe/Warsaw"},
+    "SE": {"lang": "sv-SE", "lang_full": "sv-SE,sv;q=0.9,en;q=0.8", "timezone": "Europe/Stockholm"},
+    "NO": {"lang": "nb-NO", "lang_full": "nb-NO,nb;q=0.9,en;q=0.8", "timezone": "Europe/Oslo"},
+    "DK": {"lang": "da-DK", "lang_full": "da-DK,da;q=0.9,en;q=0.8", "timezone": "Europe/Copenhagen"},
+    "FI": {"lang": "fi-FI", "lang_full": "fi-FI,fi;q=0.9,en;q=0.8", "timezone": "Europe/Helsinki"},
+    "IE": {"lang": "en-IE", "lang_full": "en-IE,en;q=0.9", "timezone": "Europe/Dublin"},
+    "AT": {"lang": "de-AT", "lang_full": "de-AT,de;q=0.9,en;q=0.8", "timezone": "Europe/Vienna"},
+    "BE": {"lang": "fr-BE", "lang_full": "fr-BE,fr;q=0.9,nl;q=0.8,en;q=0.7", "timezone": "Europe/Brussels"},
+    "PT": {"lang": "pt-PT", "lang_full": "pt-PT,pt;q=0.9,en;q=0.8", "timezone": "Europe/Lisbon"},
+    "RU": {"lang": "ru-RU", "lang_full": "ru-RU,ru;q=0.9,en;q=0.8", "timezone": "Europe/Moscow"},
+    "UA": {"lang": "uk-UA", "lang_full": "uk-UA,uk;q=0.9,ru;q=0.8", "timezone": "Europe/Kiev"},
+    "MX": {"lang": "es-MX", "lang_full": "es-MX,es;q=0.9,en;q=0.8", "timezone": "America/Mexico_City"},
+    "AR": {"lang": "es-AR", "lang_full": "es-AR,es;q=0.9,en;q=0.8", "timezone": "America/Argentina/Buenos_Aires"},
+    "CO": {"lang": "es-CO", "lang_full": "es-CO,es;q=0.9,en;q=0.8", "timezone": "America/Bogota"},
+    "CL": {"lang": "es-CL", "lang_full": "es-CL,es;q=0.9,en;q=0.8", "timezone": "America/Santiago"},
+    "PE": {"lang": "es-PE", "lang_full": "es-PE,es;q=0.9,en;q=0.8", "timezone": "America/Lima"},
+    "ZA": {"lang": "en-ZA", "lang_full": "en-ZA,en;q=0.9", "timezone": "Africa/Johannesburg"},
+    "NG": {"lang": "en-NG", "lang_full": "en-NG,en;q=0.9", "timezone": "Africa/Lagos"},
+    "EG": {"lang": "ar-EG", "lang_full": "ar-EG,ar;q=0.9,en;q=0.8", "timezone": "Africa/Cairo"},
+    "SA": {"lang": "ar-SA", "lang_full": "ar-SA,ar;q=0.9,en;q=0.8", "timezone": "Asia/Riyadh"},
+    "AE": {"lang": "ar-AE", "lang_full": "ar-AE,ar;q=0.9,en;q=0.8", "timezone": "Asia/Dubai"},
+    "IL": {"lang": "he-IL", "lang_full": "he-IL,he;q=0.9,en;q=0.8", "timezone": "Asia/Jerusalem"},
+    "NZ": {"lang": "en-NZ", "lang_full": "en-NZ,en;q=0.9", "timezone": "Pacific/Auckland"},
+}
+
+
+def country_locale(country: str) -> dict[str, str]:
+    """按国家码返回 (lang, lang_full, timezone)；未知/空回退美区默认。"""
+    return COUNTRY_LOCALE.get(str(country or "").upper(), COUNTRY_LOCALE["US"])

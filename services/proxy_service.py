@@ -39,6 +39,10 @@ class ProxyService:
         self._port: str = "1000"
         # v3.4 T88：代理黑名单 {proxy_url_line: {"expires_at": timestamp, "reason": str}}
         self._blacklist: dict[str, dict] = {}
+        # P0-5：代理池被注册线程/浏览器协程/token 巡检/清理线程并发访问，加锁保护游标与黑名单
+        self._lock = threading.RLock()
+        # v4.0 P0-2：最近一次 get_next/get_random 取到的出口国家（指纹地理联动）
+        self._last_country: str = self._country
         self._load()
         self._load_blacklist()
 
@@ -68,7 +72,10 @@ class ProxyService:
                             self._security_pass = pass_parts[0]
                         if len(pass_parts) >= 2:
                             self._country = pass_parts[1]
-                    entries.append({"type": "kookeey", "line": line})
+                    # 记录本条 kookeey 的出口国家（v4.0 P0-2：指纹地理联动用）
+                    _pass_parts = parts[3].split("-")
+                    _country = _pass_parts[1] if len(_pass_parts) >= 2 else "US"
+                    entries.append({"type": "kookeey", "line": line, "country": _country})
                 else:
                     # 通用 HTTP 代理
                     entries.append({"type": "http", "line": line})
@@ -81,6 +88,11 @@ class ProxyService:
     @property
     def country(self) -> str:
         return self._country
+
+    @property
+    def last_country(self) -> str:
+        """最近一次取到的代理出口国家（v4.0 P0-2：指纹地理联动）。"""
+        return self._last_country
 
     def _kookeey_url(self, line: str) -> str:
         """根据 kookeey 行生成带随机 session 的代理 URL"""
@@ -114,38 +126,44 @@ class ProxyService:
 
     def get_next(self) -> str | None:
         """按顺序取池中下一个代理（kookeey 动态生成新 IP），跳过黑名单内未到期的代理。"""
-        if not self._entries:
+        with self._lock:
+            if not self._entries:
+                return None
+            start_idx = self._idx
+            for _ in range(len(self._entries)):
+                entry = self._entries[self._idx % len(self._entries)]
+                self._idx += 1
+                # 跳过黑名单内的代理
+                if entry["line"] in self._blacklist:
+                    blk = self._blacklist[entry["line"]]
+                    if time.time() < blk["expires_at"]:
+                        continue  # 黑名单未到期，跳过
+                    # 已到期，从黑名单清除
+                    del self._blacklist[entry["line"]]
+                if entry["type"] == "kookeey":
+                    self._last_country = str(entry.get("country") or self._country)
+                    return self._kookeey_url(entry["line"]) or None
+                self._last_country = self._country
+                return self._http_url(entry["line"])
+            # 所有代理都在黑名单中，回退到第一个（让调用方能拿到错误，不静默返回 None）
+            self._idx = start_idx
             return None
-        start_idx = self._idx
-        for _ in range(len(self._entries)):
-            entry = self._entries[self._idx % len(self._entries)]
-            self._idx += 1
-            # 跳过黑名单内的代理
-            if entry["line"] in self._blacklist:
-                blk = self._blacklist[entry["line"]]
-                if time.time() < blk["expires_at"]:
-                    continue  # 黑名单未到期，跳过
-                # 已到期，从黑名单清除
-                del self._blacklist[entry["line"]]
-            if entry["type"] == "kookeey":
-                return self._kookeey_url(entry["line"]) or None
-            return self._http_url(entry["line"])
-        # 所有代理都在黑名单中，回退到第一个（让调用方能拿到错误，不静默返回 None）
-        self._idx = start_idx
-        return None
 
     def get_random(self) -> str | None:
         """随机取一个代理（kookeey 动态生成新 IP），跳过黑名单内未到期的代理。"""
-        if not self._entries:
-            return None
-        candidates = [e for e in self._entries if e["line"] not in self._blacklist
-                      or time.time() >= self._blacklist[e["line"]]["expires_at"]]
-        if not candidates:
-            return None
-        entry = random.choice(candidates)
-        if entry["type"] == "kookeey":
-            return self._kookeey_url(entry["line"]) or None
-        return self._http_url(entry["line"])
+        with self._lock:
+            if not self._entries:
+                return None
+            candidates = [e for e in self._entries if e["line"] not in self._blacklist
+                          or time.time() >= self._blacklist[e["line"]]["expires_at"]]
+            if not candidates:
+                return None
+            entry = random.choice(candidates)
+            if entry["type"] == "kookeey":
+                self._last_country = str(entry.get("country") or self._country)
+                return self._kookeey_url(entry["line"]) or None
+            self._last_country = self._country
+            return self._http_url(entry["line"])
 
     def mark_bad(self, proxy_url: str, reason: str = "risk_control", ttl_sec: int = 1800) -> None:
         """把代理加入黑名单，TTL 内不再被 get_next/get_random 取到。
@@ -156,25 +174,26 @@ class ProxyService:
         """
         if not proxy_url:
             return
-        # 从 proxy_url 反查 proxies.txt 行（反向匹配 host:port）
-        try:
-            from urllib.parse import urlparse
-            u = urlparse(proxy_url)
-            target = f"{u.hostname}:{u.port}" if u.port else u.hostname
-        except Exception:
-            target = proxy_url
-        # 匹配最接近的行
-        line = proxy_url  # 默认用完整 url
-        for entry in self._entries:
-            if target in entry["line"] or proxy_url in entry["line"]:
-                line = entry["line"]
-                break
-        self._blacklist[line] = {
-            "expires_at": time.time() + ttl_sec,
-            "reason": reason,
-        }
-        # 持久化
-        self._save_blacklist()
+        with self._lock:
+            # 从 proxy_url 反查 proxies.txt 行（反向匹配 host:port）
+            try:
+                from urllib.parse import urlparse
+                u = urlparse(proxy_url)
+                target = f"{u.hostname}:{u.port}" if u.port else u.hostname
+            except Exception:
+                target = proxy_url
+            # 匹配最接近的行
+            line = proxy_url  # 默认用完整 url
+            for entry in self._entries:
+                if target in entry["line"] or proxy_url in entry["line"]:
+                    line = entry["line"]
+                    break
+            self._blacklist[line] = {
+                "expires_at": time.time() + ttl_sec,
+                "reason": reason,
+            }
+            # 持久化
+            self._save_blacklist()
 
     def _load_blacklist(self) -> None:
         """从文件加载持久化黑名单（进程重启不丢失）。"""
@@ -203,7 +222,8 @@ class ProxyService:
     def blacklist_size(self) -> int:
         """当前黑名单中未到期的代理数。"""
         now = time.time()
-        return sum(1 for v in self._blacklist.values() if v.get("expires_at", 0) > now)
+        with self._lock:
+            return sum(1 for v in self._blacklist.values() if v.get("expires_at", 0) > now)
 
     def format_for_display(self, proxy_url: str | None) -> str:
         if not proxy_url:
@@ -216,8 +236,9 @@ class ProxyService:
             return proxy_url
 
     def reload(self) -> None:
-        self._idx = 0
-        self._load()
+        with self._lock:
+            self._idx = 0
+            self._load()
 
     # ── B9: auto_cleanup 后台线程 ──────────────────────────────
 
@@ -248,23 +269,29 @@ class ProxyService:
             self._cleanup_stop.set()
 
     def _run_cleanup_once(self) -> None:
-        """执行一次代理健康检查：遍历所有代理，TCP 连通性 + HTTP 出口探测，不健康自动标记黑名单 30min。"""
+        """执行一次代理健康检查：遍历所有代理，TCP 连通性 + HTTP 出口探测，不健康自动标记黑名单 30min。
+
+        P0-5 并发：只在锁内取快照 + 逐条做黑名单判断/构建 URL，网络探测在锁外执行，
+        避免几百个代理的慢探测长时间阻塞 get_next/get_random。
+        """
         import asyncio
         import httpx
         from urllib.parse import urlparse
 
-        for entry in self._entries:
+        with self._lock:
+            snapshot = list(self._entries)
+
+        for entry in snapshot:
             line = entry["line"]
-            # 跳过已在黑名单中的代理
-            if line in self._blacklist and time.time() < self._blacklist[line]["expires_at"]:
-                continue
-
-            # 构建代理 URL
-            if entry["type"] == "kookeey":
-                proxy_url = self._kookeey_url(line)
-            else:
-                proxy_url = self._http_url(line)
-
+            with self._lock:
+                # 跳过已在黑名单中的代理
+                if line in self._blacklist and time.time() < self._blacklist[line]["expires_at"]:
+                    continue
+                # 构建代理 URL
+                if entry["type"] == "kookeey":
+                    proxy_url = self._kookeey_url(line)
+                else:
+                    proxy_url = self._http_url(line)
             if not proxy_url:
                 continue
 
