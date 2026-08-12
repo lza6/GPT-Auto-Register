@@ -18,6 +18,7 @@ import base64
 import datetime as dt
 import enum
 import hashlib
+import logging
 import random
 import re
 import secrets
@@ -33,6 +34,14 @@ import json
 import requests
 
 from services.sentinel import build_sentinel_token
+from services.sentinel_quickjs import (
+    QuickJSNetworkError,
+    get_sentinel_token_via_quickjs,
+    node_available,
+    quickjs_script_available,
+)
+
+logger = logging.getLogger(__name__)
 
 # OpenAI OAuth 常量：收敛到 services/constants.py（B5），保留别名向后兼容
 from services.constants import (
@@ -361,6 +370,14 @@ class ProtocolRegister:
         # （_register_sync 开头 _fresh_fingerprint 选一次，线程局部贯穿全流程，不同账号不同指纹）。
         # v3.4 T80：注册专用线程池（由 register_engine 注入；None 时 run_in_executor 走默认池，向后兼容）。
         self._executor = None
+        # 真实 sentinel SDK 求解（quickjs）：优先于合成 PoW，JS/PoW 失败自动降级合成。
+        # 需要 node 可执行文件 + 脚本存在 + config.sentinel_quickjs 开启（默认开）。
+        self._quickjs = False
+        try:
+            qj = str(config.get("sentinel_quickjs") or "true").strip().lower()
+            self._quickjs = qj not in ("0", "false", "off", "no") and node_available() and quickjs_script_available()
+        except Exception:
+            self._quickjs = False
 
     def _fresh_fingerprint(self) -> tuple[str, str]:
         """为一次注册生成 (TLS指纹, 配套UA)。每账号调用一次 → 一账号一指纹。
@@ -410,6 +427,31 @@ class ProtocolRegister:
         return session
 
     def _sentinel_headers(self, session: Any, device_id: str, flow: str, ua: str = "") -> dict:
+        """生成 sentinel 请求头。
+
+        quickjs（真实 sdk.js）优先：sdk_token 直接作为 openai-sentinel-token，
+        so_token 放 openai-sentinel-so-token（服务端要求时）。
+        链路级网络/TLS 瞬断（QuickJSNetworkError）上抛——它是可恢复的网络问题，
+        走上层 network 分类/降级，而不是降级合成（合成照样过不了服务端深度校验）。
+        其余 JS/PoW 失败自动降级合成 PoW（开发环境无 node 时也能跑）。
+        """
+        if self._quickjs:
+            try:
+                res = get_sentinel_token_via_quickjs(
+                    session, device_id, flow=flow, user_agent=ua or self.ua,
+                )
+                if res:
+                    sdk_token, so_token = res
+                    headers = {"openai-sentinel-token": sdk_token}
+                    if so_token:
+                        headers["openai-sentinel-so-token"] = so_token
+                    return headers
+                logger.debug("Sentinel QuickJS 返回空，降级合成 PoW (flow=%s)", flow)
+            except QuickJSNetworkError:
+                raise
+            except Exception as e:
+                logger.debug("Sentinel QuickJS 异常，降级合成 PoW (flow=%s): %s", flow, e)
+        # 合成路径（原有）：JSON sentinel value + oai-sc cookie
         sentinel, oai_sc = build_sentinel_token(session, device_id, flow, user_agent=ua or self.ua)
         if oai_sc:
             session.cookies.set("oai-sc", oai_sc, domain=".openai.com")

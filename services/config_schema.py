@@ -49,6 +49,9 @@ _CONFIG_SCHEMA: dict[str, tuple[tuple[type, ...], Any, bool]] = {
     # 一账号一指纹（v3.3）：TLS 指纹固定值/自定义池（空=默认 Chrome 池随机）
     "tls_fingerprint": ((str,), "", True),
     "tls_fingerprint_pool": ((str,), "", True),
+    # 真实 sentinel SDK 求解（v4.0）：Node vm 跑真实 sdk.js，防合成 PoW 被服务端深度校验识破
+    # （邮件验证码 silent-drop）。无 node 或失败时自动降级合成 PoW。
+    "sentinel_quickjs": ((bool, str), True, False),
 }
 
 

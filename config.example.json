@@ -28,5 +28,6 @@
   "token_refresh_enabled": false,
   "token_refresh_interval_sec": 21600,
   "cf_retry_max": 2,
-  "tls_verify": true
+  "tls_verify": true,
+  "sentinel_quickjs": true
 }

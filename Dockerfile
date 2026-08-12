@@ -8,12 +8,14 @@ WORKDIR /app
 
 # ─── 第1层：系统依赖（低频变化） ────────────────────────────────
 # camoufox(firefox 内核) headless 运行库 + xvfb 兜底
+# nodejs：sentinel 真实 SDK 求解（quickjs，Node vm 跑真实 sdk.js）
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc libpq-dev \
     libgtk-3-0 libx11-xcb1 libdbus-glib-1-2 libxt6 libasound2 \
     libxcomposite1 libxdamage1 libxrandr2 libgbm1 libpango-1.0-0 libcairo2 \
     libnss3 libnspr4 libxss1 libxshmfence1 \
     xvfb \
+    nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 # ─── 第2层：Python 依赖（仅 requirements.txt 变化时失效） ───────
