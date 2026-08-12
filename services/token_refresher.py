@@ -39,7 +39,8 @@ class TokenRefresher:
         self._task: asyncio.Task | None = None
         self._running = False
         self._last_scan_at: float = 0
-        self._last_result: dict[str, int] = {"scanned": 0, "refreshed": 0, "failed": 0}
+        self._last_result: dict[str, int] = {"scanned": 0, "refreshed": 0, "failed": 0,
+                                             "active": 0, "unknown": 0, "deactivated": 0}
         self._scanning = False  # v3.4 T84：防重入哨兵（扫描慢于 interval 时不叠加）
         self._consecutive_errors = 0  # v3.4 T84：连续异常计数，驱动退避重启
 

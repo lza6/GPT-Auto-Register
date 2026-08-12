@@ -140,7 +140,8 @@ class TestTokenRefresher:
         r = TokenRefresher({})
         assert r._interval == 21600  # 默认 6h
         assert r.is_running is False
-        assert r.last_result == {"scanned": 0, "refreshed": 0, "failed": 0}
+        assert r.last_result == {"scanned": 0, "refreshed": 0, "failed": 0,
+                                 "active": 0, "unknown": 0, "deactivated": 0}
 
     def test_interval_string_compat(self):
         from services.token_refresher import TokenRefresher
@@ -152,10 +153,11 @@ class TestTokenRefresher:
         r = TokenRefresher({"token_refresh_interval_sec": "abc"})
         assert r._interval == 21600
 
-    def test_refresh_token_monkeypatch(self):
-        """monkeypatch _refresh_token 验证 scan_once 逻辑"""
+    def test_refresh_token_monkeypatch(self, monkeypatch):
+        """monkeypatch _probe/_refresh_token 验证 scan_once 探活优先 + RT 恢复链落库"""
         from services.token_refresher import TokenRefresher
         from services import db as dbmod
+        import services.account_liveness as almod
 
         # 用临时 db
         import tempfile, os
@@ -173,12 +175,22 @@ class TestTokenRefresher:
                                  openai_refresh_token="rt_b")
 
             r = TokenRefresher({})
+            # v4.0 P1-4/5：先探活（都判 AT 失效），再走 RT 恢复链
+            async def fake_probe(acc, proxy_url=None):
+                return {"status": "token_invalid", "error": "401"}
+            r._probe = fake_probe
+
             # monkeypatch _refresh_token：rt_a 成功（返回三件套），rt_b 失败
             async def fake_refresh(rt):
                 if rt == "rt_a":
                     return {"access_token": "new_tok", "refresh_token": "rt_a_rotated", "id_token": ""}
                 return None
             r._refresh_token = fake_refresh
+
+            # 恢复链的二次探活确认：new_tok 探活 active
+            async def fake_probe_at(at, **k):
+                return {"status": "active", "error": ""}
+            monkeypatch.setattr(almod, "probe_access_token", fake_probe_at)
 
             result = _run(r._scan_once())
             assert result["scanned"] == 2
